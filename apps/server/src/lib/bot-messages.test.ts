@@ -3,10 +3,13 @@ import { describe, expect, test } from "bun:test";
 import { buildReviewQueueReminderMessages } from "../runtime/review-queue";
 import {
   formatFirstPrivateMessageRegistrationNotice,
+  formatConfiguredPrivateHelp,
   formatPrivateHelp,
+  formatPrivatePostAutoRegistrationNotice,
   formatPrivatePostBodyStart,
   formatPrivatePostConfirmPrompt,
   formatPrivatePostDraftPrompt,
+  formatPrivatePostHistory,
   formatRegisterAlready,
   formatRegisterExtended,
   formatRegisterSuccess,
@@ -22,7 +25,7 @@ const loginUrl = "https://wall.campux.top/login";
 function expectLoginAndForgotPasswordGuidance(message: string) {
   expect(message).toContain(`登录链接：${loginUrl}`);
   expect(message).toContain("忘记密码时");
-  expect(message).toContain("#重置密码");
+  expect(message).toContain("重置密码");
 }
 
 describe("bot registration messages", () => {
@@ -63,8 +66,8 @@ describe("bot registration messages", () => {
           const message = formatPrivateHelp(stylishEnabled);
 
           expect(message).toContain("自动注册");
-          expect(message).toContain("忘记密码时");
-          expect(message).toContain("#重置密码");
+          expect(message).toContain("重置密码");
+          expect(message).toContain("历史投稿");
           expect(message).not.toContain("#注册账号");
         }
       }
@@ -81,6 +84,21 @@ describe("bot registration messages", () => {
     expect(formatFirstPrivateMessageRegistrationNotice({ password: null, alreadyHadTenantAccess: true }, loginUrl, false))
       .toBeNull();
   });
+
+  test("posting auto-registration notice includes the initial password and posting choices", () => {
+    const message = formatPrivatePostAutoRegistrationNotice({ password: "InitPass9", alreadyHadTenantAccess: false }, loginUrl);
+    expect(message).toContain("您未注册当前墙，已自动注册");
+    expect(message).toContain("InitPass9");
+    expect(message).toContain("登录网站投稿");
+    expect(message).toContain("当前对话投稿");
+    expect(formatPrivatePostAutoRegistrationNotice({ password: null, alreadyHadTenantAccess: true }, loginUrl)).toBeNull();
+  });
+
+  test("legacy first-private auto-registration copy is replaced by the current help", () => {
+    const legacy = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
+    expect(formatConfiguredPrivateHelp(legacy, false)).toBe(formatPrivateHelp(false));
+    expect(formatConfiguredPrivateHelp("自定义回复", false)).toBe("自定义回复");
+  });
 });
 
 describe("bot private post messages", () => {
@@ -88,7 +106,8 @@ describe("bot private post messages", () => {
     const message = formatPrivatePostBodyStart(false, false);
 
     expect(message).toContain("以下是正文内容");
-    expect(message).toContain("#结束");
+    expect(message).toContain("结束");
+    expect(message).not.toContain("#结束");
   });
 
   test("uses semantic edit-state copy for AI intake", () => {
@@ -147,6 +166,16 @@ describe("bot private post messages", () => {
     expect(message).not.toContain("如果内容无误，就用自然语言告诉我可以发布");
     expect(message).not.toContain("确认提交/可以发布");
     expect(message).not.toContain("#确认");
+  });
+
+  test("formats the latest five post states and withdrawal hint", () => {
+    const message = formatPrivatePostHistory([
+      { displayId: 12, text: "已经发布的内容", status: "published", createdAt: "2026/7/18 10:00" },
+      { displayId: 11, text: "等待审核", status: "pending_approval", createdAt: "2026/7/18 09:00" },
+    ]);
+    expect(message).toContain("#12｜已发布");
+    expect(message).toContain("#11｜待审核");
+    expect(message).toContain("撤回123");
   });
 });
 

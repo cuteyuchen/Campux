@@ -79,13 +79,16 @@ describe("review group ban command parsing", () => {
     expect(parseCommand("unban 123456789")).toBeNull();
   });
 
-  test("审核群解析支持裸 ban/unban 命令", () => {
-    expect(parseReviewGroupCommand("ban 123456789 刷屏广告")).toEqual({ name: "ban", args: "123456789 刷屏广告" });
-    expect(parseReviewGroupCommand("unban 123456789")).toEqual({ name: "unban", args: "123456789" });
+  test("审核群裸命令只有在 @ 机器人后才启用", () => {
+    expect(parseReviewGroupCommand("ban 123456789 刷屏广告")).toBeNull();
+    expect(parseReviewGroupCommand("ban 123456789 刷屏广告", true)).toEqual({ name: "ban", args: "123456789 刷屏广告" });
+    expect(parseReviewGroupCommand("unban 123456789", true)).toEqual({ name: "unban", args: "123456789" });
+    expect(parseReviewGroupCommand("发布 今天放假", true)).toEqual({ name: "发布", args: "今天放假" });
+    expect(parseReviewGroupCommand("过 123", true)).toEqual({ name: "通过", args: "123" });
   });
 
   test("审核群裸命令复用 CQ at 规范化", () => {
-    expect(parseReviewGroupCommand("[CQ:at,qq=10000] ban 123456789 刷屏广告")).toEqual({ name: "ban", args: "123456789 刷屏广告" });
+    expect(parseReviewGroupCommand("[CQ:at,qq=10000] ban 123456789 刷屏广告", true)).toEqual({ name: "ban", args: "123456789 刷屏广告" });
   });
 });
 
@@ -131,11 +134,12 @@ describe("review group multi-bot routing", () => {
 });
 
 describe("private post semantic mode selection", () => {
-  test("非 AI 确认提交阶段只接受 #确认 或 #取消", () => {
+  test("非 AI 确认提交阶段允许省略命令前缀", () => {
     expect(parsePrivatePostConfirmText("#确认")).toEqual({ confirmed: true });
     expect(parsePrivatePostConfirmText("＃确认")).toEqual({ confirmed: true });
     expect(parsePrivatePostConfirmText("#取消")).toEqual({ confirmed: false });
-    expect(parsePrivatePostConfirmText("确认")).toBeNull();
+    expect(parsePrivatePostConfirmText("确认")).toEqual({ confirmed: true });
+    expect(parsePrivatePostConfirmText("取消")).toEqual({ confirmed: false });
     expect(parsePrivatePostConfirmText("可以提交")).toBeNull();
   });
 
@@ -228,8 +232,8 @@ describe("private post semantic mode selection", () => {
     })).toBe(false);
   });
 
-  test("AI 收稿开启时禁用投稿关键词指令分支", () => {
-    expect(shouldRunPrivatePostKeywordCommand(true)).toBe(false);
+  test("AI 收稿开启时仍保留明确投稿命令", () => {
+    expect(shouldRunPrivatePostKeywordCommand(true)).toBe(true);
     expect(shouldRunPrivatePostKeywordCommand(false)).toBe(true);
   });
 

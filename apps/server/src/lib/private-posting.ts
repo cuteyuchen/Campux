@@ -13,8 +13,12 @@ function matchKeyword(input: string, keyword: string): string | null {
   const half = `#${keyword}`;
   const full = `＃${keyword}`;
   const prefix = input.startsWith(half) ? half : input.startsWith(full) ? full : null;
-  if (!prefix) return null;
-  return input.slice(prefix.length).trimStart();
+  if (prefix) return input.slice(prefix.length).trimStart();
+  if (input === keyword) return "";
+  if (!input.startsWith(keyword)) return null;
+  const suffix = input.slice(keyword.length);
+  if (!/^[\s:：]/.test(suffix)) return null;
+  return suffix.replace(/^[\s:：]+/, "");
 }
 
 export type PrivatePostStartParseOptions = {
@@ -25,11 +29,6 @@ export type PrivatePostStartParseOptions = {
 export function parsePrivatePostStartText(input: string, options?: PrivatePostStartParseOptions | string[] | undefined) {
   const trimmed = input.trim();
   const extraKeywords = Array.isArray(options) ? options : options?.extraKeywords;
-  const aiIntakeEnabled = Array.isArray(options) ? false : options?.aiIntakeEnabled === true;
-
-  if (aiIntakeEnabled) {
-    return null;
-  }
 
   // 默认支持 #投稿（也可不带 # 前缀走下面兜底）
   const defaultMatch = matchKeyword(trimmed, "投稿");
@@ -53,19 +52,19 @@ export function parsePrivatePostStartText(input: string, options?: PrivatePostSt
 }
 
 export function isPrivatePostFinishText(input: string) {
-  return /^(?:#|＃)(?:结束|结束投稿)\s*$/.test(input.trim());
+  return /^(?:#|＃|\/)?\s*(?:结束|结束投稿)\s*$/.test(input.trim());
 }
 
 export function isPrivatePostCancelText(input: string) {
-  return /^(?:#|＃)(?:取消|取消本次投稿)\s*$/.test(input.trim());
+  return /^(?:#|＃|\/)?\s*(?:取消|取消本次投稿)\s*$/.test(input.trim());
 }
 
 export function isPrivatePostUndoText(input: string) {
-  return /^(?:#|＃)(?:撤回|撤回上一条|撤回上一步)\s*$/.test(input.trim());
+  return /^(?:#|＃|\/)?\s*(?:撤回|撤回上一条|撤回上一步)\s*$/.test(input.trim());
 }
 
 export function parsePrivatePostModeText(input: string) {
-  const match = input.trim().match(/^(?:#|＃)(匿名|实名)(?:投稿)?\s*$/);
+  const match = input.trim().match(/^(?:#|＃|\/)?\s*(匿名|实名)(?:投稿)?\s*$/);
   if (!match) {
     return null;
   }
@@ -77,13 +76,38 @@ export function parsePrivatePostModeText(input: string) {
 
 export function parsePrivatePostConfirmText(input: string) {
   const trimmed = input.trim();
-  if (/^(?:#|＃)确认\s*$/.test(trimmed)) {
+  if (/^(?:#|＃|\/)?\s*确认\s*$/.test(trimmed)) {
     return { confirmed: true };
   }
-  if (/^(?:#|＃)(?:取消|取消提交|取消本次投稿)\s*$/.test(trimmed)) {
+  if (/^(?:#|＃|\/)?\s*(?:取消|取消提交|取消本次投稿)\s*$/.test(trimmed)) {
     return { confirmed: false };
   }
   return null;
+}
+
+export type PrivatePostManagementCommand =
+  | { name: "history" }
+  | { name: "withdraw"; displayId: number; reason: string | null };
+
+export function parsePrivatePostManagementCommand(input: string): PrivatePostManagementCommand | null {
+  const normalized = input.trim();
+  if (/^(?:#|＃|\/)?\s*历史投稿\s*$/.test(normalized)) {
+    return { name: "history" };
+  }
+
+  const withdraw = normalized.match(/^(?:#|＃|\/)?\s*撤回\s*#?(\d+)(?:\s+([\s\S]*\S))?\s*$/);
+  if (!withdraw?.[1]) {
+    return null;
+  }
+  const displayId = Number.parseInt(withdraw[1], 10);
+  if (!Number.isInteger(displayId) || displayId <= 0) {
+    return null;
+  }
+  return {
+    name: "withdraw",
+    displayId,
+    reason: withdraw[2]?.trim() || null,
+  };
 }
 
 export function extractOneBotImageSegments(message: unknown) {

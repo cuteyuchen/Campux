@@ -190,8 +190,8 @@ const registerSuccessDefault = (password: string, loginUrl: string) => [
   "登录账号：当前 QQ",
   `初始密码：\n${password}`,
   `登录链接：${loginUrl}`,
-  "忘记密码时，请发送 #重置密码 获取新密码。",
-  "发 #投稿 开始投稿吧~",
+  "忘记密码时，请发送“重置密码”获取新密码。",
+  "发送“投稿”开始投稿吧~",
 ].join("\n\n");
 
 const registerSuccessStylish = [
@@ -200,16 +200,16 @@ const registerSuccessStylish = [
     "登录账号：当前 QQ",
     `初始密码：\n${password}`,
     `登录链接：${loginUrl}`,
-    "忘记密码时，请发送 #重置密码 获取新密码。",
-    "发 #投稿 开始投稿吧~",
+    "忘记密码时，请发送“重置密码”获取新密码。",
+    "发送“投稿”开始投稿吧~",
   ].join("\n\n"),
   (password: string, loginUrl: string) => [
     "✅ 注册完成！",
     "登录账号：当前 QQ",
     `初始密码：\n${password}`,
     `登录链接：${loginUrl}`,
-    "忘记密码时，请发送 #重置密码 获取新密码。",
-    "发 #投稿 开始投稿吧~",
+    "忘记密码时，请发送“重置密码”获取新密码。",
+    "发送“投稿”开始投稿吧~",
   ].join("\n\n"),
   registerSuccessDefault,
 ];
@@ -222,13 +222,13 @@ export function formatRegisterSuccess(password: string, loginUrl: string, stylis
 const registerAlreadyDefault = (loginUrl: string) => [
   "这个 QQ 已经注册过啦。",
   `登录链接：${loginUrl}`,
-  "忘记密码时，请发送 #重置密码 获取新密码。",
-  "发 #投稿 开始投稿吧~",
+  "忘记密码时，请发送“重置密码”获取新密码。",
+  "发送“投稿”开始投稿吧~",
 ].join("\n");
 
 const registerAlreadyStylish = [
-  (loginUrl: string) => `🤔 这个 QQ 早就注册过了呀~\n登录链接：${loginUrl}\n忘记密码时，请发送 #重置密码 获取新密码。\n发 #投稿 开始投稿吧~`,
-  (loginUrl: string) => `📌 已经注册过啦。\n登录链接：${loginUrl}\n忘记密码时，请发送 #重置密码 获取新密码。\n发 #投稿 开始投稿吧~`,
+  (loginUrl: string) => `🤔 这个 QQ 早就注册过了呀~\n登录链接：${loginUrl}\n忘记密码时，请发送“重置密码”获取新密码。\n发送“投稿”开始投稿吧~`,
+  (loginUrl: string) => `📌 已经注册过啦。\n登录链接：${loginUrl}\n忘记密码时，请发送“重置密码”获取新密码。\n发送“投稿”开始投稿吧~`,
   registerAlreadyDefault,
 ];
 
@@ -240,12 +240,12 @@ export function formatRegisterAlready(loginUrl: string, stylishEnabled = false):
 const registerExtendedDefault = (loginUrl: string) => [
   "已经帮你开通本校园墙的访问权限了，登录密码沿用原账号。",
   `登录链接：${loginUrl}`,
-  "忘记密码时，请发送 #重置密码 获取新密码。",
-  "发 #投稿 开始投稿吧~",
+  "忘记密码时，请发送“重置密码”获取新密码。",
+  "发送“投稿”开始投稿吧~",
 ].join("\n");
 
 const registerExtendedStylish = [
-  (loginUrl: string) => `🔓 已开通本墙权限，登录密码沿用原账号。\n登录链接：${loginUrl}\n忘记密码时，请发送 #重置密码 获取新密码。\n发 #投稿 开始投稿吧~`,
+  (loginUrl: string) => `🔓 已开通本墙权限，登录密码沿用原账号。\n登录链接：${loginUrl}\n忘记密码时，请发送“重置密码”获取新密码。\n发送“投稿”开始投稿吧~`,
   registerExtendedDefault,
 ];
 
@@ -265,17 +265,59 @@ export function formatFirstPrivateMessageRegistrationNotice(
     : formatRegisterExtended(loginUrl, stylishEnabled);
 }
 
+export function formatPrivatePostAutoRegistrationNotice(
+  result: { password: string | null; alreadyHadTenantAccess: boolean },
+  loginUrl: string,
+): string | null {
+  if (result.alreadyHadTenantAccess) return null;
+  if (result.password) {
+    return `您未注册当前墙，已自动注册，初始密码为 ${result.password}。您可以登录网站投稿，也可以在当前对话投稿。\n登录链接：${loginUrl}`;
+  }
+  return `您未注册当前墙，已自动开通当前墙权限，登录密码沿用原账号。您可以登录网站投稿，也可以在当前对话投稿。\n登录链接：${loginUrl}`;
+}
+
+const privatePostStatusLabels: Record<string, string> = {
+  pending_approval: "待审核",
+  approved: "审核通过，等待发布",
+  rejected: "审核未通过",
+  cancelled: "已取消",
+  publishing: "发布中",
+  partially_failed: "部分发布失败",
+  failed: "发布失败",
+  published: "已发布",
+  pending_recall: "撤回申请处理中",
+  recalled: "已撤回",
+};
+
+export function formatPrivatePostStatus(status: string): string {
+  return privatePostStatusLabels[status] ?? status;
+}
+
+export function formatPrivatePostHistory(items: Array<{ displayId: number; text: string; status: string; createdAt: string }>): string {
+  if (items.length === 0) {
+    return "您还没有投稿记录。发送“投稿”即可开始投稿。";
+  }
+  const lines = ["您最近的投稿："];
+  for (const item of items) {
+    const preview = escapeCqCode(item.text).replace(/\s+/g, " ").trim();
+    const shortPreview = preview ? (preview.length > 36 ? `${preview.slice(0, 36)}…` : preview) : "（仅图片投稿）";
+    lines.push("", `#${item.displayId}｜${formatPrivatePostStatus(item.status)}｜${item.createdAt}`, shortPreview);
+  }
+  lines.push("", "发送“撤回123”可取消自己的待审核稿件，或申请撤回自己的已发布稿件；也可以追加撤回理由。前缀 # 可省略。");
+  return lines.join("\n");
+}
+
 // ── 对话投稿正文编辑引导（选择模式后一次性提示） ──────
 
 const privatePostBodyStartDefault =
-  "好的，以下是正文内容，直接发送文字或图片即可添加。发送 #撤回 可撤回上一条，发送 #结束 提交投稿。（发送 #取消 取消本次投稿）";
+  "好的，以下是正文内容，直接发送文字或图片即可添加。发送“撤回”可撤回上一条，发送“结束”提交投稿。（发送“取消”取消本次投稿）";
 const privatePostBodyStartAiDefault =
   "内容都准备好了吗？接下来你可以继续发图文补充，如果确认没问题，直接告诉我发布即可，也可以随时撤回或取消！";
 
 const privatePostBodyStartStylish = [
-  "📝 好的，以下是正文内容~ 直接发文字或图片就行，发完记得 #结束 提交！",
-  "✏️ 好嘞，直接发送正文内容和图片吧。发 #撤回 删上一条，发 #结束 完成投稿~",
-  "✨ 开始编辑正文吧~ 直接发送文字或图片添加内容。发 #撤回 撤回上一条，发 #结束 提交投稿。",
+  "📝 好的，以下是正文内容~ 直接发文字或图片就行，发完记得发送“结束”提交！",
+  "✏️ 好嘞，直接发送正文内容和图片吧。发送“撤回”删上一条，发送“结束”完成投稿~",
+  "✨ 开始编辑正文吧~ 直接发送文字或图片添加内容。发送“撤回”撤回上一条，发送“结束”提交投稿。",
   privatePostBodyStartDefault,
 ];
 const privatePostBodyStartAiStylish = [
@@ -601,13 +643,13 @@ export function formatQZoneAutoRefreshReason(reason: string): string {
 // ── 对话投稿提示 ──────────────────────────────────────
 
 const privatePostModeDefault =
-  "现在回复 #匿名 或 #实名 选择投稿方式。（取消本次投稿请发送 #取消）";
+  "现在回复“匿名”或“实名”选择投稿方式。（取消本次投稿请发送“取消”）";
 const privatePostModeAiDefault =
   "请告诉我这次投稿是否匿名，可以直接回复“匿名/实名/是/否”等自然语言。也可以说“取消本次投稿”。";
 
 const privatePostModeStylish = [
-  "✨ 好嘞！回复 #匿名 悄悄说，或者 #实名 光明正大发~（发 #取消 就不投了）",
-  "📝 选择投稿方式吧~ #匿名 还是 #实名？（要取消就发 #取消）",
+  "✨ 好嘞！回复“匿名”悄悄说，或者回复“实名”光明正大发~（发送“取消”就不投了）",
+  "📝 选择投稿方式吧~ 匿名还是实名？（要取消就发送“取消”）",
   privatePostModeDefault,
 ];
 const privatePostModeAiStylish = [
@@ -628,13 +670,13 @@ export function formatPrivatePostModePrompt(stylishEnabled = false, aiIntakeEnab
 // ── 对话投稿草稿提示 ──────────────────────────────────
 
 const privatePostDraftDefault =
-  "继续发送添加稿件正文及图片，删除上一句话请发送 #撤回 ，结束投稿并发布请发送 #结束 。（取消本次投稿请发送 #取消）";
+  "继续发送添加稿件正文及图片，删除上一句话请发送“撤回”，结束投稿请发送“结束”。（取消本次投稿请发送“取消”）";
 const privatePostDraftAiDefault =
   "继续发送添加稿件正文及图片；完成后直接说清楚想继续补充、发布、撤回或取消，我会按语义理解你的意思。";
 
 const privatePostDraftStylish = [
-  "📎 继续发正文或图片吧~ 发 #撤回 删掉上一条，写完了发 #结束 提交！（发 #取消 就取消）",
-  "继续发送添加稿件正文及图片，发 #撤回 删除上一条，发 #结束 完成投稿。（取消请发 #取消）",
+  "📎 继续发正文或图片吧~ 发送“撤回”删掉上一条，写完了发送“结束”提交！（发送“取消”就取消）",
+  "继续发送添加稿件正文及图片，发送“撤回”删除上一条，发送“结束”完成投稿。（取消请发送“取消”）",
   privatePostDraftDefault,
 ];
 const privatePostDraftAiStylish = [
@@ -657,8 +699,8 @@ export function formatPrivatePostDraftPrompt(stylishEnabled = false, aiIntakeEna
 const privatePostContinueDefault = "继续发送添加稿件正文及图片";
 
 const privatePostContinueStylish = [
-  "📝 继续~ 可以再发正文或图片，发完记得 #结束 哦",
-  "继续发送添加稿件正文及图片，写好了发 #结束 提交~",
+  "📝 继续~ 可以再发正文或图片，发完记得发送“结束”哦",
+  "继续发送添加稿件正文及图片，写好了发送“结束”提交~",
   privatePostContinueDefault,
 ];
 
@@ -684,7 +726,7 @@ function formatPrivatePostPreview(text: string, attachmentCount: number) {
 export function formatPrivatePostConfirmPrompt(text: string, attachmentCount: number, aiIntakeEnabled = false): string {
   const actionHint = aiIntakeEnabled
     ? "检查一下没问题的话，直接跟我说发布就行；要是想取消，也请随时告诉我。"
-    : "确认无误请发送 #确认，取消提交请发送 #取消。";
+    : "确认无误请发送“确认”，取消提交请发送“取消”。";
   return [formatPrivatePostPreview(text, attachmentCount), "", actionHint].join("\n");
 }
 
@@ -706,29 +748,32 @@ export function formatPrivatePostCancelled(stylishEnabled = false): string {
 // ── 对话投稿帮助 ──────────────────────────────────────
 
 const privateHelpDefault = [
-  "首次给墙号发送私聊消息时，系统会自动注册本校园墙的 Campux 账号。",
-  "忘记密码时，请发送 #重置密码 获取新密码。",
-  "想投稿时先发 #投稿，然后回复 #匿名 或 #实名 选择投稿方式。",
-  "选择后继续发送添加稿件正文及图片，删除上一句话请发送 #撤回，结束投稿并发布请发送 #结束。",
-  "取消本次投稿请发送 #取消。",
+  "发送“投稿”时，系统会检查当前墙账号；未注册会自动注册并告知初始密码。",
+  "忘记密码时，请发送“重置密码”获取新密码。",
+  "想投稿时发送“投稿”，然后回复“匿名”或“实名”选择投稿方式。",
+  "选择后继续发送正文及图片；发送“撤回”删除上一条，发送“结束”进入确认。",
+  "发送“历史投稿”可查看最近 5 条投稿，发送“撤回123”可取消或申请撤回自己的稿件。",
+  "取消本次投稿请发送“取消”。以上命令也兼容 # 前缀。",
 ].join("\n");
 
 const privateHelpStylish = [
   [
     "📋 我可以帮你做这些事：",
     "",
-    "首次私聊 — 自动注册本墙 Campux 账号",
-    "忘记密码时发送 #重置密码 — 获取新密码",
-    "#投稿 正文 — 开始对话投稿",
-    "#取消 — 取消本次投稿",
+    "投稿 — 开始对话投稿，未注册时自动注册",
+    "重置密码 — 获取新密码",
+    "历史投稿 — 查看最近 5 条投稿",
+    "撤回123 — 取消或申请撤回自己的稿件",
+    "取消 — 取消本次对话投稿（# 前缀可省略）",
   ].join("\n"),
   [
     "✨ 试试这些功能吧：",
     "",
-    "• 首次私聊会自动注册本墙 Campux 账号",
-    "• 忘记密码时发送 #重置密码 获取新密码",
-    "• #投稿 正文/图片 — 开始投稿",
-    "• #取消 — 取消投稿",
+    "• 发送“投稿”开始投稿，未注册时自动注册",
+    "• 发送“重置密码”获取新密码",
+    "• 发送“历史投稿”查看最近 5 条",
+    "• 发送“撤回123”取消或申请撤回自己的稿件",
+    "• 所有命令的 # 前缀均可省略",
   ].join("\n"),
   privateHelpDefault,
 ];
@@ -736,6 +781,15 @@ const privateHelpStylish = [
 export function formatPrivateHelp(stylishEnabled = false): string {
   if (!stylishEnabled) return privateHelpDefault;
   return pick(privateHelpStylish);
+}
+
+const legacyPrivateAutoRegistrationReply = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
+
+export function formatConfiguredPrivateHelp(configured: string | null | undefined, stylishEnabled = false): string {
+  if (!configured?.trim() || configured.trim() === legacyPrivateAutoRegistrationReply) {
+    return formatPrivateHelp(stylishEnabled);
+  }
+  return configured;
 }
 
 // ── 私信回复 ──────────────────────────────────────────

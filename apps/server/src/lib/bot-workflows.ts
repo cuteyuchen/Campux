@@ -181,7 +181,7 @@ export async function resetPasswordViaBot({
 
   const membership = user?.memberships.find((item) => item.tenantId === bot.tenantId);
   if (!user || !membership) {
-    throw new BotWorkflowError("账号还没有注册这个校园墙，请先发送 #注册账号", 404);
+    throw new BotWorkflowError("账号还没有注册这个校园墙，请先发送“注册账号”，或直接发送“投稿”自动注册", 404);
   }
 
   await prisma.user.update({
