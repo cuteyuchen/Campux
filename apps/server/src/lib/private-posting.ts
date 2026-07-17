@@ -87,12 +87,16 @@ export function parsePrivatePostConfirmText(input: string) {
 
 export type PrivatePostManagementCommand =
   | { name: "history" }
+  | { name: "withdraw_list" }
   | { name: "withdraw"; displayId: number; reason: string | null };
 
 export function parsePrivatePostManagementCommand(input: string): PrivatePostManagementCommand | null {
   const normalized = input.trim();
-  if (/^(?:#|＃|\/)?\s*历史投稿\s*$/.test(normalized)) {
+  if (/^(?:#|＃|\/)?\s*(?:历史投稿|稿件)\s*$/.test(normalized)) {
     return { name: "history" };
+  }
+  if (/^(?:#|＃|\/)?\s*撤回\s*$/.test(normalized)) {
+    return { name: "withdraw_list" };
   }
 
   const withdraw = normalized.match(/^(?:#|＃|\/)?\s*撤回\s*#?(\d+)(?:\s+([\s\S]*\S))?\s*$/);

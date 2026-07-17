@@ -97,13 +97,16 @@ describe("private posting command parsing", () => {
     expect(parsePrivatePostConfirmText("取消")).toEqual({ confirmed: false });
   });
 
-  test("parses history and numbered withdrawal commands without requiring a prefix", () => {
+  test("parses history and withdrawal management commands without requiring a prefix", () => {
     expect(parsePrivatePostManagementCommand("历史投稿")).toEqual({ name: "history" });
     expect(parsePrivatePostManagementCommand("#历史投稿")).toEqual({ name: "history" });
+    expect(parsePrivatePostManagementCommand("稿件")).toEqual({ name: "history" });
+    expect(parsePrivatePostManagementCommand("#稿件")).toEqual({ name: "history" });
+    expect(parsePrivatePostManagementCommand("撤回")).toEqual({ name: "withdraw_list" });
+    expect(parsePrivatePostManagementCommand("#撤回")).toEqual({ name: "withdraw_list" });
     expect(parsePrivatePostManagementCommand("撤回123")).toEqual({ name: "withdraw", displayId: 123, reason: null });
     expect(parsePrivatePostManagementCommand("撤回 #123 不想公开了")).toEqual({ name: "withdraw", displayId: 123, reason: "不想公开了" });
     expect(parsePrivatePostManagementCommand("#撤回 456 内容有误")).toEqual({ name: "withdraw", displayId: 456, reason: "内容有误" });
-    expect(parsePrivatePostManagementCommand("撤回")).toBeNull();
   });
 });
 

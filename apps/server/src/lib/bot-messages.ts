@@ -307,22 +307,39 @@ export function formatPrivatePostHistory(items: Array<{ displayId: number; text:
   return lines.join("\n");
 }
 
+export function formatPrivatePostWithdrawPrompt(items: Array<{ displayId: number; text: string; status: string; createdAt: string }>): string {
+  if (items.length === 0) {
+    return "当前没有可以取消或申请撤回的稿件。";
+  }
+  const lines = ["您当前已投稿或已审核通过的稿件："];
+  for (const item of items) {
+    const preview = escapeCqCode(item.text).replace(/\s+/g, " ").trim();
+    const shortPreview = preview ? (preview.length > 36 ? `${preview.slice(0, 36)}…` : preview) : "（仅图片投稿）";
+    lines.push("", `#${item.displayId}｜${formatPrivatePostStatus(item.status)}｜${item.createdAt}`, shortPreview);
+  }
+  lines.push(
+    "",
+    "请输入“撤回+编号+理由”，例如：撤回12 内容有误。待审核稿件会直接取消，已发布稿件会提交撤回申请；审核通过待发布或发布中的稿件请等待发布完成后再申请。",
+  );
+  return lines.join("\n");
+}
+
 // ── 对话投稿正文编辑引导（选择模式后一次性提示） ──────
 
 const privatePostBodyStartDefault =
-  "好的，以下是正文内容，直接发送文字或图片即可添加。发送“撤回”可撤回上一条，发送“结束”提交投稿。（发送“取消”取消本次投稿）";
+  "好的，以下是正文内容，直接发送文字或图片即可添加。发送“撤回上一条”可删除上一条，发送“结束”提交投稿。（发送“取消”取消本次投稿）";
 const privatePostBodyStartAiDefault =
   "内容都准备好了吗？接下来你可以继续发图文补充，如果确认没问题，直接告诉我发布即可，也可以随时撤回或取消！";
 
 const privatePostBodyStartStylish = [
   "📝 好的，以下是正文内容~ 直接发文字或图片就行，发完记得发送“结束”提交！",
-  "✏️ 好嘞，直接发送正文内容和图片吧。发送“撤回”删上一条，发送“结束”完成投稿~",
-  "✨ 开始编辑正文吧~ 直接发送文字或图片添加内容。发送“撤回”撤回上一条，发送“结束”提交投稿。",
+  "✏️ 好嘞，直接发送正文内容和图片吧。发送“撤回上一条”删上一条，发送“结束”完成投稿~",
+  "✨ 开始编辑正文吧~ 直接发送文字或图片添加内容。发送“撤回上一条”删除上一条，发送“结束”提交投稿。",
   privatePostBodyStartDefault,
 ];
 const privatePostBodyStartAiStylish = [
   "📝 好的，已进入投稿编辑~ 继续发文字或图片补充内容，写完直接说明你想发布就好。",
-  "✏️ 好嘞，继续发正文和图片吧。想修改、撤回、发布或放弃都直接说明意思。",
+  "✏️ 好嘞，继续发正文和图片吧。想修改、撤回上一条、发布或放弃都直接说明意思。",
   "✨ 开始编辑投稿吧~ 发完自然告诉我你的想法，我会按语义处理。",
   privatePostBodyStartAiDefault,
 ];
@@ -496,7 +513,8 @@ export function formatRecallRequestNotification(
     `${prefix}稿件申请撤回：#${displayId}`,
     `申请人：${authorName}（QQ ${qqUin.toString()}）`,
     `理由：${reason}`,
-    "审核员或管理员可在稿件页面同意撤回；同意后系统会把每个 QZone 发布目标设置为仅自己可见。",
+    "引用本消息回复“过/通过”可同意撤回，回复“拒/拒绝”可拒绝；也可以在稿件页面处理。",
+    "同意后系统会把每个 QZone 发布目标设置为仅自己可见。",
   ].join("\n");
 }
 
@@ -670,17 +688,17 @@ export function formatPrivatePostModePrompt(stylishEnabled = false, aiIntakeEnab
 // ── 对话投稿草稿提示 ──────────────────────────────────
 
 const privatePostDraftDefault =
-  "继续发送添加稿件正文及图片，删除上一句话请发送“撤回”，结束投稿请发送“结束”。（取消本次投稿请发送“取消”）";
+  "继续发送添加稿件正文及图片，删除上一句话请发送“撤回上一条”，结束投稿请发送“结束”。（取消本次投稿请发送“取消”）";
 const privatePostDraftAiDefault =
-  "继续发送添加稿件正文及图片；完成后直接说清楚想继续补充、发布、撤回或取消，我会按语义理解你的意思。";
+  "继续发送添加稿件正文及图片；完成后直接说清楚想继续补充、发布、撤回上一条或取消，我会按语义理解你的意思。";
 
 const privatePostDraftStylish = [
-  "📎 继续发正文或图片吧~ 发送“撤回”删掉上一条，写完了发送“结束”提交！（发送“取消”就取消）",
-  "继续发送添加稿件正文及图片，发送“撤回”删除上一条，发送“结束”完成投稿。（取消请发送“取消”）",
+  "📎 继续发正文或图片吧~ 发送“撤回上一条”删掉上一条，写完了发送“结束”提交！（发送“取消”就取消）",
+  "继续发送添加稿件正文及图片，发送“撤回上一条”删除上一条，发送“结束”完成投稿。（取消请发送“取消”）",
   privatePostDraftDefault,
 ];
 const privatePostDraftAiStylish = [
-  "📎 继续发正文或图片吧~ 写完直接说明你想发布、撤回或取消，我会按语义处理。",
+  "📎 继续发正文或图片吧~ 写完直接说明你想发布、撤回上一条或取消，我会按语义处理。",
   "继续发送添加稿件正文及图片，完成后自然告诉我下一步想怎么做即可。",
   privatePostDraftAiDefault,
 ];
@@ -751,8 +769,9 @@ const privateHelpDefault = [
   "发送“投稿”时，系统会检查当前墙账号；未注册会自动注册并告知初始密码。",
   "忘记密码时，请发送“重置密码”获取新密码。",
   "想投稿时发送“投稿”，然后回复“匿名”或“实名”选择投稿方式。",
-  "选择后继续发送正文及图片；发送“撤回”删除上一条，发送“结束”进入确认。",
-  "发送“历史投稿”可查看最近 5 条投稿，发送“撤回123”可取消或申请撤回自己的稿件。",
+  "选择后继续发送正文及图片；发送“撤回上一条”删除上一条，发送“结束”进入确认。",
+  "发送“历史投稿”或“稿件”可查看最近 5 条投稿；单独发送“撤回”可查看可处理稿件。",
+  "发送“撤回123 理由”可取消或申请撤回自己的稿件。",
   "取消本次投稿请发送“取消”。以上命令也兼容 # 前缀。",
 ].join("\n");
 
@@ -762,8 +781,9 @@ const privateHelpStylish = [
     "",
     "投稿 — 开始对话投稿，未注册时自动注册",
     "重置密码 — 获取新密码",
-    "历史投稿 — 查看最近 5 条投稿",
-    "撤回123 — 取消或申请撤回自己的稿件",
+    "历史投稿 / 稿件 — 查看最近 5 条投稿",
+    "撤回 — 查看可取消或申请撤回的稿件",
+    "撤回123 理由 — 取消或申请撤回自己的稿件",
     "取消 — 取消本次对话投稿（# 前缀可省略）",
   ].join("\n"),
   [
@@ -771,8 +791,9 @@ const privateHelpStylish = [
     "",
     "• 发送“投稿”开始投稿，未注册时自动注册",
     "• 发送“重置密码”获取新密码",
-    "• 发送“历史投稿”查看最近 5 条",
-    "• 发送“撤回123”取消或申请撤回自己的稿件",
+    "• 发送“历史投稿”或“稿件”查看最近 5 条",
+    "• 单独发送“撤回”查看可处理稿件",
+    "• 发送“撤回123 理由”取消或申请撤回自己的稿件",
     "• 所有命令的 # 前缀均可省略",
   ].join("\n"),
   privateHelpDefault,

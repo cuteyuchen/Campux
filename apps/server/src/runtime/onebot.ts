@@ -23,6 +23,7 @@ import { compressImageBuffer, deleteAttachmentObjects, uploadAttachmentBytes, ty
 import { findActiveBan, hasTenantRole } from "../lib/auth";
 import { buildCampuxLoginUrl } from "../lib/campux-login-url";
 import { prisma } from "../lib/prisma";
+import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedError } from "../lib/post-recall";
 import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartText, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
 import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled } from "../lib/tenant-metadata";
@@ -68,6 +69,7 @@ import {
   formatFirstPrivateMessageRegistrationNotice,
   formatPrivatePostAutoRegistrationNotice,
   formatPrivatePostHistory,
+  formatPrivatePostWithdrawPrompt,
   formatPrivatePostStatus,
   formatResetPassword,
   formatUndoText,
@@ -1180,6 +1182,10 @@ export class OneBotRuntime {
         await this.sendPrivatePostHistory(bot, botQqUin, userQqUin);
         return;
       }
+      if (managementCommand?.name === "withdraw_list") {
+        await this.sendPrivatePostWithdrawPrompt(bot, botQqUin, userQqUin);
+        return;
+      }
       if (managementCommand?.name === "withdraw") {
         await this.handlePrivatePostWithdrawal({
           bot,
@@ -1583,6 +1589,39 @@ export class OneBotRuntime {
       take: 5,
     });
     await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostHistory(posts.map((post) => ({
+      displayId: post.displayId,
+      text: post.text,
+      status: post.status,
+      createdAt: formatDateTime(post.createdAt),
+    }))));
+  }
+
+  private async sendPrivatePostWithdrawPrompt(
+    bot: { tenantId: string },
+    botQqUin: string,
+    userQqUin: string,
+  ) {
+    const { operator } = await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
+    const posts = await prisma.post.findMany({
+      where: {
+        tenantId: bot.tenantId,
+        authorId: operator.id,
+        status: {
+          in: ["pending_approval", "approved", "publishing", "published", "pending_recall"],
+        },
+      },
+      select: {
+        displayId: true,
+        text: true,
+        status: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 5,
+    });
+    await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostWithdrawPrompt(posts.map((post) => ({
       displayId: post.displayId,
       text: post.text,
       status: post.status,
@@ -2451,6 +2490,104 @@ export class OneBotRuntime {
     return { post };
   }
 
+  private async tryHandleQuotedRecallDecision({
+    bot,
+    groupId,
+    operatorQqUin,
+    displayId,
+    action,
+    comment,
+  }: {
+    bot: { tenantId: string };
+    groupId: string;
+    operatorQqUin: string;
+    displayId: number;
+    action: "approve" | "reject";
+    comment?: string | null;
+  }): Promise<boolean> {
+    const post = await prisma.post.findFirst({
+      where: {
+        tenantId: bot.tenantId,
+        displayId,
+        status: "pending_recall",
+      },
+      select: {
+        id: true,
+        displayId: true,
+      },
+    });
+    if (!post) {
+      return false;
+    }
+
+    const { operator } = await requireBotTenantRole(bot.tenantId, operatorQqUin, "reviewer");
+    if (action === "approve") {
+      try {
+        const result = await executePostRecall({
+          tenantId: bot.tenantId,
+          postId: post.id,
+          actorId: operator.id,
+          logger: this.logger,
+        });
+        await this.notifyPostRecalled(result.post.id, result.results.length);
+        return true;
+      } catch (error) {
+        if (error instanceof PostRecallExecutionError) {
+          await this.notifyPostRecallFailed(post.id, error.results).catch(() => undefined);
+          throw new BotWorkflowError("部分发布目标撤回失败，请检查日志后重试", 502);
+        }
+        if (error instanceof PostRecallNotSupportedError) {
+          throw new BotWorkflowError(error.message, 409);
+        }
+        throw error;
+      }
+    }
+
+    const reason = comment?.trim() || "审核员拒绝撤回申请";
+    try {
+      await prisma.post.update({
+        where: {
+          id: post.id,
+          status: "pending_recall",
+        },
+        data: {
+          status: "published",
+          recallIgnored: false,
+          recallIgnoredAt: null,
+          logs: {
+            create: {
+              tenantId: bot.tenantId,
+              actorId: operator.id,
+              oldStatus: "pending_recall",
+              newStatus: "published",
+              comment: reason,
+            },
+          },
+        },
+      });
+    } catch (error) {
+      if (isPrismaKnownRequestError(error) && error.code === "P2025") {
+        throw new BotWorkflowError(`稿件 #${displayId} 的撤回申请已被处理`, 409);
+      }
+      throw error;
+    }
+    await writeAuditLog({
+      tenantId: bot.tenantId,
+      actorId: operator.id,
+      action: "post.recall.reject",
+      targetType: "post",
+      targetId: post.id,
+      detail: {
+        displayId: post.displayId,
+        comment: reason,
+        groupId,
+        source: "review_group_reply",
+      },
+    });
+    await this.notifyPostRecallRejected(post.id, reason);
+    return true;
+  }
+
   private async handleGroupMessage(event: OneBotMessageEvent) {
     const botQqUin = normalizeId(event.self_id);
     const groupId = normalizeId(event.group_id);
@@ -2464,7 +2601,10 @@ export class OneBotRuntime {
       return;
     }
 
-    const command = parseReviewGroupCommand(extractPlainText(event), isMentioningBot(event, botQqUin));
+    const command = parseReviewGroupCommand(
+      extractPlainText(event),
+      isMentioningBot(event, botQqUin) || this.extractReplyMessageId(event) !== null,
+    );
 
 
     if (!command) {
@@ -2508,12 +2648,22 @@ export class OneBotRuntime {
 
       if (command.name === "通过") {
         let displayId = parseDisplayId(command.args);
-        // 尝试从引用消息解析稿件编号：仅在操作员 mention 机器人且存在引用时才解析
-        if (!displayId && isMentioningBot(event, botQqUin)) {
+        let resolvedFromReply = false;
+        if (!displayId) {
           displayId = await this.tryResolveDisplayIdFromReply(event, botQqUin);
+          resolvedFromReply = displayId !== null;
         }
         if (!displayId) {
           await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
+          return;
+        }
+        if (resolvedFromReply && await this.tryHandleQuotedRecallDecision({
+          bot,
+          groupId,
+          operatorQqUin,
+          displayId,
+          action: "approve",
+        })) {
           return;
         }
         const result = await reviewPostViaBot({
@@ -2531,19 +2681,26 @@ export class OneBotRuntime {
 
       if (command.name === "拒绝") {
         // 拒绝可以是：#拒绝 <理由> <稿件id>
-        // 也可以是：@bot 引用机器人通知消息之后发送 "拒 <理由>"
+        // 也可以引用机器人通知消息后发送“拒 <理由>”。撤回申请允许只回复“拒”。
         let parsed = parseRejectArgs(command.args);
         if (!parsed) {
-          // 如果没有在 args 里解析到 displayId，尝试从引用消息里解析
           const commentOnly = command.args.trim();
-          if (!commentOnly) {
+          const displayIdFromReply = await this.tryResolveDisplayIdFromReply(event, botQqUin);
+          if (!displayIdFromReply) {
             await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
             return;
           }
-          const displayIdFromReply = isMentioningBot(event, botQqUin)
-            ? await this.tryResolveDisplayIdFromReply(event, botQqUin)
-            : null;
-          if (!displayIdFromReply) {
+          if (await this.tryHandleQuotedRecallDecision({
+            bot,
+            groupId,
+            operatorQqUin,
+            displayId: displayIdFromReply,
+            action: "reject",
+            comment: commentOnly,
+          })) {
+            return;
+          }
+          if (!commentOnly) {
             await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
             return;
           }

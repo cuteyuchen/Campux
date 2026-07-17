@@ -85,6 +85,10 @@ describe("review group ban command parsing", () => {
     expect(parseReviewGroupCommand("unban 123456789", true)).toEqual({ name: "unban", args: "123456789" });
     expect(parseReviewGroupCommand("发布 今天放假", true)).toEqual({ name: "发布", args: "今天放假" });
     expect(parseReviewGroupCommand("过 123", true)).toEqual({ name: "通过", args: "123" });
+    expect(parseReviewGroupCommand("过", true)).toEqual({ name: "通过", args: "" });
+    expect(parseReviewGroupCommand("通过", true)).toEqual({ name: "通过", args: "" });
+    expect(parseReviewGroupCommand("拒", true)).toEqual({ name: "拒绝", args: "" });
+    expect(parseReviewGroupCommand("拒绝", true)).toEqual({ name: "拒绝", args: "" });
   });
 
   test("审核群裸命令复用 CQ at 规范化", () => {

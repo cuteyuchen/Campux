@@ -10,6 +10,8 @@ import {
   formatPrivatePostConfirmPrompt,
   formatPrivatePostDraftPrompt,
   formatPrivatePostHistory,
+  formatPrivatePostWithdrawPrompt,
+  formatRecallRequestNotification,
   formatRegisterAlready,
   formatRegisterExtended,
   formatRegisterSuccess,
@@ -137,7 +139,7 @@ describe("bot private post messages", () => {
   test("uses semantic draft copy for AI intake", () => {
     const message = formatPrivatePostDraftPrompt(false, true);
 
-    expect(message).toContain("直接说清楚想继续补充、发布、撤回或取消");
+    expect(message).toContain("直接说清楚想继续补充、发布、撤回上一条或取消");
     expect(message).not.toContain("可以提交/发出去");
     expect(message).not.toContain("#结束");
   });
@@ -176,6 +178,24 @@ describe("bot private post messages", () => {
     expect(message).toContain("#12｜已发布");
     expect(message).toContain("#11｜待审核");
     expect(message).toContain("撤回123");
+  });
+
+  test("formats withdrawal candidates and asks for an id plus reason", () => {
+    const message = formatPrivatePostWithdrawPrompt([
+      { displayId: 12, text: "已经发布的内容", status: "published", createdAt: "2026/7/18 10:00" },
+      { displayId: 11, text: "等待审核", status: "pending_approval", createdAt: "2026/7/18 09:00" },
+    ]);
+    expect(message).toContain("#12｜已发布");
+    expect(message).toContain("#11｜待审核");
+    expect(message).toContain("撤回+编号+理由");
+    expect(message).toContain("撤回12 内容有误");
+  });
+
+  test("recall request notification explains quoted approve and reject commands", () => {
+    const message = formatRecallRequestNotification(12, "张三", "10001", "内容有误");
+    expect(message).toContain("引用本消息");
+    expect(message).toContain("过/通过");
+    expect(message).toContain("拒/拒绝");
   });
 });
 
