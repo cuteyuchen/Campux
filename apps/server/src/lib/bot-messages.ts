@@ -726,7 +726,7 @@ function formatPrivatePostPreview(text: string, attachmentCount: number) {
 
 export function formatPrivatePostConfirmPrompt(text: string, attachmentCount: number, aiIntakeEnabled = false): string {
   void aiIntakeEnabled;
-  const actionHint = "回复“确认”提交；需要修改可继续发送内容。";
+  const actionHint = "回复“确认”提交，回复“取消”放弃。\n需要修改可继续发送内容。";
   return [formatPrivatePostPreview(text, attachmentCount), "", actionHint].join("\n");
 }
 
@@ -749,18 +749,12 @@ export function formatPrivatePostCancelled(stylishEnabled = false): string {
 
 const privateHelpDefault = [
   "发送“投稿”开始对话投稿。",
-  "也可以登录网站投稿：https://xxyg.cuteyuchen.top",
+  "网站投稿：https://xxyg.cuteyuchen.top",
+  "发送“指令”查看全部功能。",
 ].join("\n");
 
 const privateHelpStylish = [
-  [
-    "📮 发送“投稿”开始对话投稿。",
-    "也可以登录网站投稿：https://xxyg.cuteyuchen.top",
-  ].join("\n"),
-  [
-    "✨ 发送“投稿”即可开始对话投稿。",
-    "网站投稿：https://xxyg.cuteyuchen.top",
-  ].join("\n"),
+  `📮 ${privateHelpDefault}`,
   privateHelpDefault,
 ];
 
@@ -769,7 +763,24 @@ export function formatPrivateHelp(stylishEnabled = false): string {
   return pick(privateHelpStylish);
 }
 
+const privateCommandHelpDefault = [
+  "可用指令：",
+  "投稿：开始对话投稿",
+  "稿件：查看最近 5 条投稿",
+  "撤回：查看可处理稿件",
+  "撤回+编号+理由：取消或申请撤回自己的稿件",
+  "重置密码：重置登录密码",
+  "",
+  "投稿过程中：匿名、实名、撤回上一条、结束、确认、取消",
+  "网站投稿：https://xxyg.cuteyuchen.top",
+].join("\n");
+
+export function formatPrivateCommandHelp(stylishEnabled = false): string {
+  return stylishEnabled ? `📋 ${privateCommandHelpDefault}` : privateCommandHelpDefault;
+}
+
 const legacyPrivateAutoRegistrationReply = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
+const compactPrivateHelpReply = "发送“投稿”开始对话投稿。\n也可以登录网站投稿：https://xxyg.cuteyuchen.top";
 const verbosePrivateHelpMarkers = [
   "西峡一高表白墙自助投稿助手",
   "首次发送任意文字会自动注册当前墙",
@@ -781,6 +792,7 @@ export function formatConfiguredPrivateHelp(configured: string | null | undefine
   const normalized = configured?.trim();
   if (!normalized
     || normalized === legacyPrivateAutoRegistrationReply
+    || normalized === compactPrivateHelpReply
     || verbosePrivateHelpMarkers.every((marker) => normalized.includes(marker))) {
     return formatPrivateHelp(stylishEnabled);
   }

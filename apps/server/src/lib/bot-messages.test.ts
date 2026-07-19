@@ -4,6 +4,7 @@ import { buildReviewQueueReminderMessages } from "../runtime/review-queue";
 import {
   formatFirstPrivateMessageRegistrationNotice,
   formatConfiguredPrivateHelp,
+  formatPrivateCommandHelp,
   formatPrivateHelp,
   formatPrivatePostAutoRegistrationNotice,
   formatPrivatePostAppendAck,
@@ -66,7 +67,7 @@ describe("bot registration messages", () => {
     expectPostingEntryGuidance(formatRegisterAlready(loginUrl, false));
   });
 
-  test("default help only shows website and chat posting entries", () => {
+  test("default help only adds the command-menu entry", () => {
     const originalRandom = Math.random;
     try {
       for (const stylishEnabled of [false, true]) {
@@ -75,12 +76,11 @@ describe("bot registration messages", () => {
           const message = formatPrivateHelp(stylishEnabled);
 
           expect(message).toContain("xxyg.cuteyuchen.top");
-          expect(message).toContain("对话投稿");
-          expect(message).toContain("网站投稿");
+          expect(message).toContain("发送“投稿”开始对话投稿");
+          expect(message).toContain("发送“指令”查看全部功能");
+          expect(message).not.toContain("稿件：");
+          expect(message).not.toContain("撤回：");
           expect(message).not.toContain("自动注册");
-          expect(message).not.toContain("重置密码");
-          expect(message).not.toContain("历史投稿");
-          expect(message).not.toContain("撤回");
           expect(message).not.toContain("#注册账号");
         }
       }
@@ -108,10 +108,24 @@ describe("bot registration messages", () => {
 
   test("legacy first-private auto-registration copy is replaced by the current help", () => {
     const legacy = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
+    const compact = "发送“投稿”开始对话投稿。\n也可以登录网站投稿：https://xxyg.cuteyuchen.top";
     const verbose = "西峡一高表白墙自助投稿助手\n首次发送任意文字会自动注册当前墙，机器人会回复初始密码。\n发送“稿件”或“历史投稿”可查看最近 5 条投稿及状态。\n如有系统使用问题，请联系 QQ 1249882361。";
     expect(formatConfiguredPrivateHelp(legacy, false)).toBe(formatPrivateHelp(false));
+    expect(formatConfiguredPrivateHelp(compact, false)).toBe(formatPrivateHelp(false));
     expect(formatConfiguredPrivateHelp(verbose, false)).toBe(formatPrivateHelp(false));
     expect(formatConfiguredPrivateHelp("自定义回复", false)).toBe("自定义回复");
+  });
+
+  test("command help lists global and in-flow commands", () => {
+    const message = formatPrivateCommandHelp(false);
+
+    expect(message).toContain("投稿：开始对话投稿");
+    expect(message).toContain("稿件：查看最近 5 条投稿");
+    expect(message).toContain("撤回：查看可处理稿件");
+    expect(message).toContain("撤回+编号+理由");
+    expect(message).toContain("重置密码：重置登录密码");
+    expect(message).toContain("匿名、实名、撤回上一条、结束、确认、取消");
+    expect(message).not.toContain("所有指令均不需要 #");
   });
 });
 
@@ -175,8 +189,8 @@ describe("bot private post messages", () => {
     const message = formatPrivatePostConfirmPrompt("正文", 0, true);
 
     expect(message).toContain("回复“确认”提交");
+    expect(message).toContain("回复“取消”放弃");
     expect(message).toContain("需要修改可继续发送内容");
-    expect(message).not.toContain("取消");
   });
 
   test("only shows the required command for each posting stage", () => {

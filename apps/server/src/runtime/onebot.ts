@@ -88,6 +88,7 @@ import {
   formatPrivatePostConfirmPrompt,
   formatPrivatePostCancelled,
   formatConfiguredPrivateHelp,
+  formatPrivateCommandHelp,
   formatPrivateReplySent,
   formatPrivateReplyReceived,
   formatPrivateReplyNoTarget,
@@ -1196,6 +1197,17 @@ export class OneBotRuntime {
       const registrationNotice = shouldAutoRegisterPrivateText(plainText)
         ? await this.ensurePrivatePostRegistration({ bot, botQqUin, userQqUin, event })
         : null;
+
+      if (isPrivateHelpCommandText(plainText)) {
+        const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+        const commandHelp = formatPrivateCommandHelp(stylishEnabled);
+        await this.sendPrivateMessage(
+          botQqUin,
+          userQqUin,
+          registrationNotice ? `${registrationNotice}\n\n${commandHelp}` : commandHelp,
+        );
+        return;
+      }
 
       const startBody = parsePrivatePostStartText(plainText, {
         extraKeywords,
@@ -4137,6 +4149,15 @@ function parsePrivateCommand(input: string) {
     name: match[1],
     args: match[2]?.trim() ?? "",
   };
+}
+
+export function isPrivateHelpCommandText(input: string) {
+  const normalized = input
+    .trim()
+    .replace(/^(?:#|＃|\/)\s*/, "")
+    .replace(/[？?。！!]+$/g, "")
+    .trim();
+  return /^(?:命令|命令提示|指令|指令提示|帮助|帮助菜单|菜单|功能|功能菜单|查看命令|查看指令|有什么命令|有哪些命令|有什么指令|有哪些指令)$/.test(normalized);
 }
 
 function parseDisplayId(args: string) {

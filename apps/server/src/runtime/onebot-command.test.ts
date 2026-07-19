@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { parsePrivatePostConfirmText } from "../lib/private-posting";
 import {
   isPrivatePostAiIntakeActive,
+  isPrivateHelpCommandText,
   shouldAppendPrivatePostContentForSemantic,
   shouldApplyPrivatePostSemanticText,
   shouldConfirmPrivatePostSubmissionFromSemantic,
@@ -17,6 +18,19 @@ import {
   resolvePrivatePostSemanticAction,
   shouldHandleReviewGroupCommandForBot,
 } from "./onebot";
+
+describe("private help command", () => {
+  test("识别常见的命令菜单表达", () => {
+    for (const input of ["命令", "命令提示", "指令", "#指令", "帮助", "菜单", "有什么指令？", "查看命令"]) {
+      expect(isPrivateHelpCommandText(input)).toBe(true);
+    }
+  });
+
+  test("不把普通私聊识别为命令菜单", () => {
+    expect(isPrivateHelpCommandText("你好")).toBe(false);
+    expect(isPrivateHelpCommandText("投稿")).toBe(false);
+  });
+});
 
 describe("parseCommand prefix handling", () => {
   test("解析半角 # 命令", () => {
