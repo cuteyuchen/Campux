@@ -22,13 +22,11 @@ export function escapeCqCode(text: string): string {
 
 // ── 投稿成功 ──────────────────────────────────────────
 
-const submissionSuccessDefault = (id: number) => `投稿成功！当前稿件编号#${id}`;
+const submissionSuccessDefault = (id: number) => `投稿成功，稿件编号 #${id}，请等待审核。`;
 
 const submissionSuccessStylish = [
-  (id: number) => `✨ 稿件已收到，为你登记编号 #${id}，等待审核小分队过目~`,
-  (id: number) => `📮 信鸽已送达！你的投稿（#${id}）正躺在审核官的桌上，稍安勿躁~`,
-  (id: number) => `🎉 欧耶，投稿成功！编号 #${id} 已生成，正在排队等待审核~`,
-  (id: number) => `💌 你的心声已收录 🫶 稿件编号 #${id}，审核员们很快就来翻牌~`,
+  (id: number) => `✅ 投稿成功，稿件编号 #${id}，请等待审核。`,
+  (id: number) => `📮 投稿已收到，稿件编号 #${id}，请等待审核。`,
   submissionSuccessDefault,
 ];
 
@@ -265,9 +263,9 @@ export function formatPrivatePostAutoRegistrationNotice(
 ): string | null {
   if (result.alreadyHadTenantAccess) return null;
   if (result.password) {
-    return `检测到当前账号未注册，已自动注册。\n初始密码：${result.password}\n\n${formatPostingEntryGuidance(loginUrl)}`;
+    return `检测到当前账号未注册，已自动注册。\n初始密码：${result.password}\n\n当前对话投稿流程已开始。\n也可以登录网站投稿：${loginUrl}`;
   }
-  return `已自动开通当前墙权限，登录密码沿用原账号。\n\n${formatPostingEntryGuidance(loginUrl)}`;
+  return `已自动开通当前墙权限，登录密码沿用原账号。\n\n当前对话投稿流程已开始。\n也可以登录网站投稿：${loginUrl}`;
 }
 
 const privatePostStatusLabels: Record<string, string> = {
@@ -320,15 +318,13 @@ export function formatPrivatePostWithdrawPrompt(items: Array<{ displayId: number
 
 // ── 对话投稿正文编辑引导（选择模式后一次性提示） ──────
 
-const privatePostBodyStartDefault =
-  "现在直接发送文字或图片即可；只发图片时会用“投稿”作为默认文字。完成后说“结束”“完成”或“发布”，我会先展示预览；删除上一条说“撤回上一条”，取消本次投稿说“取消”。";
+const privatePostBodyStartDefault = "请发送投稿内容，完成后说“结束”。";
 const privatePostBodyStartAiDefault =
   privatePostBodyStartDefault;
 
 const privatePostBodyStartStylish = [
-  "📝 开始编辑啦，直接发文字或图片；只发图片会用“投稿”作为默认文字。完成后说“结束”“完成”或“发布”。",
-  "✏️ 直接发送正文和图片即可，只发图片也可以。发完说“结束”“完成”或“发布”；放弃说“取消”。",
-  "✨ 现在可以连续发送文字和图片，只发图片时默认文字为“投稿”。完成后说“结束”“完成”或“发布”。",
+  "📝 请发送投稿内容，完成后说“结束”。",
+  "✏️ 可以开始发送内容了，完成后说“结束”。",
   privatePostBodyStartDefault,
 ];
 const privatePostBodyStartAiStylish = [
@@ -347,12 +343,11 @@ export function formatPrivatePostBodyStart(stylishEnabled = false, aiIntakeEnabl
 
 // ── 对话投稿追加确认（简短版，不重复完整内容） ────────
 
-const privatePostAppendAckDefault = "已添加。可以继续发送，完成后说“结束”或“发布”。";
+const privatePostAppendAckDefault = "已添加，完成后说“结束”。";
 
 const privatePostAppendAckStylish = [
-  "✅ 已添加。可以继续发送，完成后说“结束”或“发布”。",
-  "📎 收到，已经加进稿件了。发完说“结束”或“发布”即可。",
-  "好的，已添加。还可以继续补充，完成后说“结束”。",
+  "✅ 已添加，完成后说“结束”。",
+  "📎 已加入稿件，完成后说“结束”。",
   privatePostAppendAckDefault,
 ];
 
@@ -652,14 +647,13 @@ export function formatQZoneAutoRefreshReason(reason: string): string {
 
 // ── 对话投稿提示 ──────────────────────────────────────
 
-const privatePostModeDefault =
-  "这次要匿名还是实名？回复“匿名/不显示名字”或“实名/显示名字”即可；放弃投稿直接说“取消”。";
+const privatePostModeDefault = "请选择“匿名”或“实名”。";
 const privatePostModeAiDefault =
   privatePostModeDefault;
 
 const privatePostModeStylish = [
-  "✨ 这次要匿名还是实名？回复“匿名/不显示名字”或“实名/显示名字”都可以，放弃就说“取消”。",
-  "📝 请选择匿名方式：回复“匿名”或“实名”；也可以说“不显示名字”或“显示名字”。",
+  "✨ 请选择“匿名”或“实名”。",
+  "📝 请回复“匿名”或“实名”。",
   privatePostModeDefault,
 ];
 const privatePostModeAiStylish = [
@@ -678,14 +672,13 @@ export function formatPrivatePostModePrompt(stylishEnabled = false, aiIntakeEnab
 
 // ── 对话投稿草稿提示 ──────────────────────────────────
 
-const privatePostDraftDefault =
-  "继续发送文字或图片；只发图片时默认文字为“投稿”。完成后说“结束”“完成”或“发布”，放弃说“取消”。";
+const privatePostDraftDefault = "请继续发送投稿内容，完成后说“结束”。";
 const privatePostDraftAiDefault =
   privatePostDraftDefault;
 
 const privatePostDraftStylish = [
-  "📎 继续发文字或图片吧。完成后说“结束”“完成”或“发布”；取消就说“取消”。",
-  "还可以继续补充文字和图片。发完说“结束”或“发布”，删除上一条说“撤回上一条”。",
+  "📎 请继续发送投稿内容，完成后说“结束”。",
+  "还可以继续补充，完成后说“结束”。",
   privatePostDraftDefault,
 ];
 const privatePostDraftAiStylish = [
@@ -704,11 +697,11 @@ export function formatPrivatePostDraftPrompt(stylishEnabled = false, aiIntakeEna
 
 // ── 对话投稿继续编辑提示 ──────────────────────────────
 
-const privatePostContinueDefault = "请继续发送文字或图片，完成后说“结束”或“发布”。";
+const privatePostContinueDefault = "请继续发送投稿内容，完成后说“结束”。";
 
 const privatePostContinueStylish = [
-  "📝 继续发送文字或图片，发完说“结束”或“发布”即可。",
-  "还可以继续补充，完成后说“结束”“完成”或“发布”。",
+  "📝 请继续发送投稿内容，完成后说“结束”。",
+  "还可以继续补充，完成后说“结束”。",
   privatePostContinueDefault,
 ];
 
@@ -733,17 +726,17 @@ function formatPrivatePostPreview(text: string, attachmentCount: number) {
 
 export function formatPrivatePostConfirmPrompt(text: string, attachmentCount: number, aiIntakeEnabled = false): string {
   void aiIntakeEnabled;
-  const actionHint = "回复“确认/可以/发布”提交；还要补充可直接继续发文字或图片，返回编辑说“修改”，放弃说“取消”。";
+  const actionHint = "回复“确认”提交；需要修改可继续发送内容。";
   return [formatPrivatePostPreview(text, attachmentCount), "", actionHint].join("\n");
 }
 
 // ── 对话投稿取消提示 ──────────────────────────────────
 
-const privatePostCancelledDefault = "已取消发布";
+const privatePostCancelledDefault = "已取消本次投稿。";
 
 const privatePostCancelledStylish = [
-  "🗑️ 好的，已取消发布~",
-  "已取消 ✅ 这篇稿子不投啦",
+  "🗑️ 已取消本次投稿。",
+  "✅ 已取消本次投稿。",
   privatePostCancelledDefault,
 ];
 

@@ -6,10 +6,14 @@ import {
   formatConfiguredPrivateHelp,
   formatPrivateHelp,
   formatPrivatePostAutoRegistrationNotice,
+  formatPrivatePostAppendAck,
   formatPrivatePostBodyStart,
+  formatPrivatePostCancelled,
   formatPrivatePostConfirmPrompt,
+  formatPrivatePostContinuePrompt,
   formatPrivatePostDraftPrompt,
   formatPrivatePostHistory,
+  formatPrivatePostModePrompt,
   formatPrivatePostWithdrawPrompt,
   formatRecallRequestNotification,
   formatRegisterAlready,
@@ -19,6 +23,7 @@ import {
   formatReviewQueueMessages,
   formatReviewQueueReminder,
   formatReviewQueueReminderMessages,
+  formatSubmissionSuccess,
   type ReviewQueueItem,
 } from "./bot-messages";
 
@@ -114,18 +119,16 @@ describe("bot private post messages", () => {
   test("explains the next action for non-AI intake", () => {
     const message = formatPrivatePostBodyStart(false, false);
 
-    expect(message).toContain("直接发送文字或图片");
-    expect(message).toContain("完成");
-    expect(message).toContain("结束");
-    expect(message).not.toContain("#结束");
+    expect(message).toBe("请发送投稿内容，完成后说“结束”。");
+    expect(message).not.toContain("撤回");
+    expect(message).not.toContain("取消");
+    expect(message).not.toContain("默认文字");
   });
 
   test("uses semantic edit-state copy for AI intake", () => {
     const message = formatPrivatePostBodyStart(false, true);
 
-    expect(message).toContain("直接发送文字或图片");
-    expect(message).toContain("发布");
-    expect(message).not.toContain("可以提交/发出去");
+    expect(message).toBe("请发送投稿内容，完成后说“结束”。");
   });
 
   test("uses semantic stylish edit-state copy for AI intake", () => {
@@ -135,9 +138,10 @@ describe("bot private post messages", () => {
         Math.random = () => value;
         const message = formatPrivatePostBodyStart(true, true);
 
-        expect(message).not.toContain("可以提交/发出去");
-        expect(message).not.toContain("可以发出去");
-        expect(message).not.toContain("可以提交");
+        expect(message).toContain("结束");
+        expect(message).not.toContain("撤回");
+        expect(message).not.toContain("取消");
+        expect(message).not.toContain("默认文字");
       }
     } finally {
       Math.random = originalRandom;
@@ -147,10 +151,7 @@ describe("bot private post messages", () => {
   test("uses semantic draft copy for AI intake", () => {
     const message = formatPrivatePostDraftPrompt(false, true);
 
-    expect(message).toContain("继续发送文字或图片");
-    expect(message).toContain("完成");
-    expect(message).not.toContain("可以提交/发出去");
-    expect(message).not.toContain("#结束");
+    expect(message).toBe("请继续发送投稿内容，完成后说“结束”。");
   });
 
   test("uses semantic stylish draft copy for AI intake", () => {
@@ -160,10 +161,10 @@ describe("bot private post messages", () => {
         Math.random = () => value;
         const message = formatPrivatePostDraftPrompt(true, true);
 
-        expect(message).not.toContain("可以提交/发出去");
-        expect(message).not.toContain("可以提交");
-        expect(message).not.toContain("发出去即可");
-        expect(message).not.toContain("#结束");
+        expect(message).toContain("结束");
+        expect(message).not.toContain("撤回");
+        expect(message).not.toContain("取消");
+        expect(message).not.toContain("默认文字");
       }
     } finally {
       Math.random = originalRandom;
@@ -173,12 +174,17 @@ describe("bot private post messages", () => {
   test("uses semantic confirmation copy for AI intake", () => {
     const message = formatPrivatePostConfirmPrompt("正文", 0, true);
 
-    expect(message).toContain("回复“确认/可以/发布”提交");
-    expect(message).toContain("继续发文字或图片");
-    expect(message).toContain("修改");
-    expect(message).not.toContain("如果内容无误，就用自然语言告诉我可以发布");
-    expect(message).not.toContain("确认提交/可以发布");
-    expect(message).not.toContain("#确认");
+    expect(message).toContain("回复“确认”提交");
+    expect(message).toContain("需要修改可继续发送内容");
+    expect(message).not.toContain("取消");
+  });
+
+  test("only shows the required command for each posting stage", () => {
+    expect(formatPrivatePostModePrompt(false, false)).toBe("请选择“匿名”或“实名”。");
+    expect(formatPrivatePostAppendAck(false)).toBe("已添加，完成后说“结束”。");
+    expect(formatPrivatePostContinuePrompt(false)).toBe("请继续发送投稿内容，完成后说“结束”。");
+    expect(formatPrivatePostCancelled(false)).toBe("已取消本次投稿。");
+    expect(formatSubmissionSuccess(123, false)).toBe("投稿成功，稿件编号 #123，请等待审核。");
   });
 
   test("formats the latest five post states and withdrawal hint", () => {
