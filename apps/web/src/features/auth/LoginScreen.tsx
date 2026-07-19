@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import type { TenantSummary } from "@campux/domain";
+import { Eye, EyeOff } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MeResponse } from "@/types/app";
 import { Button } from "@/components/ui/button";
@@ -69,6 +70,7 @@ export function LoginScreen({
   const [savedCredentials] = useState(readSavedCredentials);
   const [account, setAccount] = useState(() => savedCredentials?.account ?? (allowTestAccounts ? "10000" : ""));
   const [password, setPassword] = useState(() => savedCredentials?.password ?? (allowTestAccounts ? "campux123" : ""));
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [remember, setRemember] = useState(() => savedCredentials !== null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<"login" | "register">("login");
@@ -155,7 +157,25 @@ export function LoginScreen({
               <p className="mt-2 text-sm leading-6 text-slate-600">输入 QQ 号或邮箱，以及你的账号密码。</p>
               <div className="mt-5 grid gap-3">
                 <Input value={account} name="username" autoComplete="username" placeholder="QQ 号 / 邮箱" onChange={(event) => handleAccountChange(event.target.value)} />
-                <Input value={password} name="password" autoComplete="current-password" type="password" placeholder="密码" onChange={(event) => handlePasswordChange(event.target.value)} />
+                <div className="relative">
+                  <Input className="pr-10" value={password} name="password" autoComplete="current-password" type={passwordVisible ? "text" : "password"} placeholder="密码" onChange={(event) => handlePasswordChange(event.target.value)} />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
+                        aria-pressed={passwordVisible}
+                        className="absolute right-0.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                        size="icon-sm"
+                        type="button"
+                        variant="ghost"
+                        onClick={() => setPasswordVisible((visible) => !visible)}
+                      >
+                        {passwordVisible ? <EyeOff /> : <Eye />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="left">{passwordVisible ? "隐藏密码" : "显示密码"}</TooltipContent>
+                  </Tooltip>
+                </div>
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
                 <Switch id="remember-credentials" checked={remember} onCheckedChange={handleRememberChange} size="sm" />
