@@ -327,20 +327,18 @@ export function formatPrivatePostWithdrawPrompt(items: Array<{ displayId: number
 // ── 对话投稿正文编辑引导（选择模式后一次性提示） ──────
 
 const privatePostBodyStartDefault =
-  "好的，以下是正文内容，直接发送文字或图片即可添加。发送“撤回上一条”可删除上一条，发送“结束”提交投稿。（发送“取消”取消本次投稿）";
+  "现在直接发送文字或图片即可；只发图片时会用“投稿”作为默认文字。完成后说“结束”“完成”或“发布”，我会先展示预览；删除上一条说“撤回上一条”，取消本次投稿说“取消”。";
 const privatePostBodyStartAiDefault =
-  "内容都准备好了吗？接下来你可以继续发图文补充，如果确认没问题，直接告诉我发布即可，也可以随时撤回或取消！";
+  privatePostBodyStartDefault;
 
 const privatePostBodyStartStylish = [
-  "📝 好的，以下是正文内容~ 直接发文字或图片就行，发完记得发送“结束”提交！",
-  "✏️ 好嘞，直接发送正文内容和图片吧。发送“撤回上一条”删上一条，发送“结束”完成投稿~",
-  "✨ 开始编辑正文吧~ 直接发送文字或图片添加内容。发送“撤回上一条”删除上一条，发送“结束”提交投稿。",
+  "📝 开始编辑啦，直接发文字或图片；只发图片会用“投稿”作为默认文字。完成后说“结束”“完成”或“发布”。",
+  "✏️ 直接发送正文和图片即可，只发图片也可以。发完说“结束”“完成”或“发布”；放弃说“取消”。",
+  "✨ 现在可以连续发送文字和图片，只发图片时默认文字为“投稿”。完成后说“结束”“完成”或“发布”。",
   privatePostBodyStartDefault,
 ];
 const privatePostBodyStartAiStylish = [
-  "📝 好的，已进入投稿编辑~ 继续发文字或图片补充内容，写完直接说明你想发布就好。",
-  "✏️ 好嘞，继续发正文和图片吧。想修改、撤回上一条、发布或放弃都直接说明意思。",
-  "✨ 开始编辑投稿吧~ 发完自然告诉我你的想法，我会按语义处理。",
+  ...privatePostBodyStartStylish,
   privatePostBodyStartAiDefault,
 ];
 
@@ -355,12 +353,12 @@ export function formatPrivatePostBodyStart(stylishEnabled = false, aiIntakeEnabl
 
 // ── 对话投稿追加确认（简短版，不重复完整内容） ────────
 
-const privatePostAppendAckDefault = "已添加 ✓";
+const privatePostAppendAckDefault = "已添加。可以继续发送，完成后说“结束”或“发布”。";
 
 const privatePostAppendAckStylish = [
-  "✅ 已添加 ✓",
-  "📎 收到~已添加 ✓",
-  "好的，已添加 ✓",
+  "✅ 已添加。可以继续发送，完成后说“结束”或“发布”。",
+  "📎 收到，已经加进稿件了。发完说“结束”或“发布”即可。",
+  "好的，已添加。还可以继续补充，完成后说“结束”。",
   privatePostAppendAckDefault,
 ];
 
@@ -661,18 +659,17 @@ export function formatQZoneAutoRefreshReason(reason: string): string {
 // ── 对话投稿提示 ──────────────────────────────────────
 
 const privatePostModeDefault =
-  "现在回复“匿名”或“实名”选择投稿方式。（取消本次投稿请发送“取消”）";
+  "这次要匿名还是实名？回复“匿名/不显示名字”或“实名/显示名字”即可；放弃投稿直接说“取消”。";
 const privatePostModeAiDefault =
-  "请告诉我这次投稿是否匿名，可以直接回复“匿名/实名/是/否”等自然语言。也可以说“取消本次投稿”。";
+  privatePostModeDefault;
 
 const privatePostModeStylish = [
-  "✨ 好嘞！回复“匿名”悄悄说，或者回复“实名”光明正大发~（发送“取消”就不投了）",
-  "📝 选择投稿方式吧~ 匿名还是实名？（要取消就发送“取消”）",
+  "✨ 这次要匿名还是实名？回复“匿名/不显示名字”或“实名/显示名字”都可以，放弃就说“取消”。",
+  "📝 请选择匿名方式：回复“匿名”或“实名”；也可以说“不显示名字”或“显示名字”。",
   privatePostModeDefault,
 ];
 const privatePostModeAiStylish = [
-  "✨ 好嘞！这次要匿名还是实名？直接说“匿名/实名/是/否”都可以~",
-  "📝 选择投稿方式吧~ 可以自然回复匿名、实名、是或否；想取消也直接说就行。",
+  ...privatePostModeStylish,
   privatePostModeAiDefault,
 ];
 
@@ -688,18 +685,17 @@ export function formatPrivatePostModePrompt(stylishEnabled = false, aiIntakeEnab
 // ── 对话投稿草稿提示 ──────────────────────────────────
 
 const privatePostDraftDefault =
-  "继续发送添加稿件正文及图片，删除上一句话请发送“撤回上一条”，结束投稿请发送“结束”。（取消本次投稿请发送“取消”）";
+  "继续发送文字或图片；只发图片时默认文字为“投稿”。完成后说“结束”“完成”或“发布”，放弃说“取消”。";
 const privatePostDraftAiDefault =
-  "继续发送添加稿件正文及图片；完成后直接说清楚想继续补充、发布、撤回上一条或取消，我会按语义理解你的意思。";
+  privatePostDraftDefault;
 
 const privatePostDraftStylish = [
-  "📎 继续发正文或图片吧~ 发送“撤回上一条”删掉上一条，写完了发送“结束”提交！（发送“取消”就取消）",
-  "继续发送添加稿件正文及图片，发送“撤回上一条”删除上一条，发送“结束”完成投稿。（取消请发送“取消”）",
+  "📎 继续发文字或图片吧。完成后说“结束”“完成”或“发布”；取消就说“取消”。",
+  "还可以继续补充文字和图片。发完说“结束”或“发布”，删除上一条说“撤回上一条”。",
   privatePostDraftDefault,
 ];
 const privatePostDraftAiStylish = [
-  "📎 继续发正文或图片吧~ 写完直接说明你想发布、撤回上一条或取消，我会按语义处理。",
-  "继续发送添加稿件正文及图片，完成后自然告诉我下一步想怎么做即可。",
+  ...privatePostDraftStylish,
   privatePostDraftAiDefault,
 ];
 
@@ -714,11 +710,11 @@ export function formatPrivatePostDraftPrompt(stylishEnabled = false, aiIntakeEna
 
 // ── 对话投稿继续编辑提示 ──────────────────────────────
 
-const privatePostContinueDefault = "继续发送添加稿件正文及图片";
+const privatePostContinueDefault = "请继续发送文字或图片，完成后说“结束”或“发布”。";
 
 const privatePostContinueStylish = [
-  "📝 继续~ 可以再发正文或图片，发完记得发送“结束”哦",
-  "继续发送添加稿件正文及图片，写好了发送“结束”提交~",
+  "📝 继续发送文字或图片，发完说“结束”或“发布”即可。",
+  "还可以继续补充，完成后说“结束”“完成”或“发布”。",
   privatePostContinueDefault,
 ];
 
@@ -742,9 +738,8 @@ function formatPrivatePostPreview(text: string, attachmentCount: number) {
 }
 
 export function formatPrivatePostConfirmPrompt(text: string, attachmentCount: number, aiIntakeEnabled = false): string {
-  const actionHint = aiIntakeEnabled
-    ? "检查一下没问题的话，直接跟我说发布就行；要是想取消，也请随时告诉我。"
-    : "确认无误请发送“确认”，取消提交请发送“取消”。";
+  void aiIntakeEnabled;
+  const actionHint = "回复“确认/可以/发布”提交；还要补充可直接继续发文字或图片，返回编辑说“修改”，放弃说“取消”。";
   return [formatPrivatePostPreview(text, attachmentCount), "", actionHint].join("\n");
 }
 
@@ -766,13 +761,14 @@ export function formatPrivatePostCancelled(stylishEnabled = false): string {
 // ── 对话投稿帮助 ──────────────────────────────────────
 
 const privateHelpDefault = [
-  "发送“投稿”时，系统会检查当前墙账号；未注册会自动注册并告知初始密码。",
-  "忘记密码时，请发送“重置密码”获取新密码。",
-  "想投稿时发送“投稿”，然后回复“匿名”或“实名”选择投稿方式。",
-  "选择后继续发送正文及图片；发送“撤回上一条”删除上一条，发送“结束”进入确认。",
+  "首次发送任意文字会自动注册当前墙账号，并告知初始密码。",
+  "想投稿时直接说“投稿”“我要投稿”或“帮我投稿”。",
+  "选择“匿名/实名”后连续发送文字和图片，完成时说“结束”“完成”或“发布”。",
+  "只发图片也可以，系统会使用“投稿”作为默认文字。",
+  "预览无误可回复“确认”“可以”或“发布”；还要修改就继续发内容。",
   "发送“历史投稿”或“稿件”可查看最近 5 条投稿；单独发送“撤回”可查看可处理稿件。",
   "发送“撤回123 理由”可取消或申请撤回自己的稿件。",
-  "取消本次投稿请发送“取消”。以上命令也兼容 # 前缀。",
+  "忘记密码说“重置密码”。所有命令都不要求 # 前缀。",
 ].join("\n");
 
 const privateHelpStylish = [

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractOneBotImageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartText } from "./private-posting";
+import { extractOneBotImageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText } from "./private-posting";
 
 describe("private posting command parsing", () => {
   test("parses English hash start command", () => {
@@ -23,6 +23,11 @@ describe("private posting command parsing", () => {
     expect(isPrivatePostFinishText("＃结束投稿")).toBe(true);
     expect(isPrivatePostFinishText("#结束投稿  ")).toBe(true);
     expect(isPrivatePostFinishText("结束")).toBe(true);
+    expect(isPrivatePostFinishText("结束了。")).toBe(true);
+    expect(isPrivatePostFinishText("发布")).toBe(true);
+    expect(isPrivatePostFinishText("结束\u200b")).toBe(true);
+    expect(isPrivatePostFinishText("好")).toBe(false);
+    expect(isPrivatePostFinishText("好了")).toBe(false);
   });
 
   test("detects cancel command with either hash", () => {
@@ -31,6 +36,7 @@ describe("private posting command parsing", () => {
     expect(isPrivatePostCancelText("#取消本次投稿")).toBe(true);
     expect(isPrivatePostCancelText("＃取消本次投稿")).toBe(true);
     expect(isPrivatePostCancelText("取消")).toBe(true);
+    expect(isPrivatePostCancelText("不投了！")).toBe(true);
   });
 
   test("detects undo command with either hash", () => {
@@ -47,6 +53,17 @@ describe("private posting command parsing", () => {
     expect(parsePrivatePostModeText("＃实名投稿")).toEqual({ anonymous: false });
     expect(parsePrivatePostModeText("匿名")).toEqual({ anonymous: true });
     expect(parsePrivatePostModeText("实名")).toEqual({ anonymous: false });
+    expect(parsePrivatePostModeText("不显示名字")).toEqual({ anonymous: true });
+    expect(parsePrivatePostModeText("显示昵称")).toEqual({ anonymous: false });
+  });
+
+  test("accepts natural start phrases", () => {
+    expect(parsePrivatePostStartText("我要投稿")).toBe("");
+    expect(parsePrivatePostStartText("帮我投稿：今天食堂加餐")).toBe("今天食堂加餐");
+    expect(parsePrivatePostStartText("墙墙帮我发 今天食堂加餐")).toBe("今天食堂加餐");
+    expect(parsePrivatePostStartText("匿名投稿：今天食堂加餐")).toBe("今天食堂加餐");
+    expect(parsePrivatePostStartModeText("匿名投稿：今天食堂加餐")).toEqual({ anonymous: true });
+    expect(parsePrivatePostStartModeText("实名投稿：今天食堂加餐")).toEqual({ anonymous: false });
   });
 
   test("does not treat ordinary text as undo command", () => {
@@ -77,6 +94,8 @@ describe("private posting command parsing", () => {
     expect(parsePrivatePostStartText("#发帖 正文", options)).toBe("正文");
     expect(parsePrivatePostStartText("投稿", options)).toBe("");
     expect(parsePrivatePostStartText("墙墙投稿", options)).toBe("");
+    expect(parsePrivatePostStartText("投稿\u200b")).toBe("");
+    expect(parsePrivatePostStartText("#投稿\u200b")).toBe("");
   });
 
   test("keeps start commands enabled when AI intake is disabled", () => {
@@ -95,6 +114,19 @@ describe("private posting command parsing", () => {
   test("accepts confirmation without a command prefix", () => {
     expect(parsePrivatePostConfirmText("确认")).toEqual({ confirmed: true });
     expect(parsePrivatePostConfirmText("取消")).toEqual({ confirmed: false });
+    expect(parsePrivatePostConfirmText("没问题！")).toEqual({ confirmed: true });
+    expect(parsePrivatePostConfirmText("结束")).toEqual({ confirmed: true });
+  });
+
+  test("accepts edit requests and defaults image-only text", () => {
+    expect(isPrivatePostEditText("再改一下")).toBe(true);
+    expect(resolvePrivatePostSubmissionText("", 2)).toBe("投稿");
+    expect(resolvePrivatePostSubmissionText("\u200b", 2)).toBe("投稿");
+    expect(resolvePrivatePostSubmissionText("\u200b", 0)).toBe("");
+    expect(resolvePrivatePostSubmissionText("  ", 0)).toBe("");
+    expect(resolvePrivatePostSubmissionText("正文", 2)).toBe("正文");
+    expect(shouldAutoRegisterPrivateText("你好")).toBe(true);
+    expect(shouldAutoRegisterPrivateText("  ")).toBe(false);
   });
 
   test("parses history and withdrawal management commands without requiring a prefix", () => {
@@ -119,6 +151,7 @@ describe("onebot message helpers", () => {
         { type: "text", data: { text: "正文" } },
       ]),
     ).toBe("#投稿 \n正文");
+    expect(extractOneBotPlainText("结束\u200b")).toBe("结束\u200b");
   });
 
   test("extracts image segments only", () => {

@@ -21,6 +21,17 @@ function matchKeyword(input: string, keyword: string): string | null {
   return suffix.replace(/^[\s:：]+/, "");
 }
 
+function stripCommandPrefix(input: string) {
+  return stripZeroWidthChars(input).trim().replace(/^(?:#|＃|\/)\s*/, "");
+}
+
+function normalizeControlText(input: string) {
+  return stripCommandPrefix(input)
+    .replace(/[。！？!?,，；;：:、]+$/g, "")
+    .trim()
+    .replace(/\s+/g, "");
+}
+
 export type PrivatePostStartParseOptions = {
   extraKeywords?: string[] | undefined;
   aiIntakeEnabled?: boolean | undefined;
@@ -30,59 +41,86 @@ export function parsePrivatePostStartText(input: string, options?: PrivatePostSt
   const trimmed = input.trim();
   const extraKeywords = Array.isArray(options) ? options : options?.extraKeywords;
 
-  // 默认支持 #投稿（也可不带 # 前缀走下面兜底）
-  const defaultMatch = matchKeyword(trimmed, "投稿");
-  if (defaultMatch !== null) return defaultMatch;
+  // 默认支持“投稿”及常见自然表达（也可不带 # 前缀）。
+  const startKeywords = ["匿名投稿", "实名投稿", "我要投稿", "我想投稿", "帮我投稿", "墙墙帮我发", "帮我发到墙上", "发到墙上", "投稿"];
+  for (const keyword of startKeywords) {
+    const match = matchKeyword(trimmed, keyword);
+    if (match !== null) return stripZeroWidthChars(match).trim() ? match : "";
+    if (matchKeyword(stripZeroWidthChars(trimmed), keyword) === "") return "";
+  }
 
   // 额外的触发关键词（支持 # 前缀）
   if (extraKeywords && extraKeywords.length > 0) {
     for (const kw of extraKeywords) {
       const match = matchKeyword(trimmed, kw);
-      if (match !== null) return match;
+      if (match !== null) return stripZeroWidthChars(match).trim() ? match : "";
+      if (matchKeyword(stripZeroWidthChars(trimmed), kw) === "") return "";
     }
   }
 
   // 也支持内置关键词不带 # 前缀：直接输入关键词即可触发投稿流程
   const plainKeywords = ["投稿", "墙墙投稿", "墙墙"];
   for (const kw of plainKeywords) {
-    if (trimmed === kw) return "";
+    if (stripZeroWidthChars(trimmed) === kw) return "";
   }
 
   return null;
 }
 
 export function isPrivatePostFinishText(input: string) {
-  return /^(?:#|＃|\/)?\s*(?:结束|结束投稿)\s*$/.test(input.trim());
+  return /^(?:结束|结束了|结束投稿|投稿结束|写好|写好了|发完|发完了|完成|完成投稿|提交|提交投稿|发布|发出去|发吧|搞定)$/.test(normalizeControlText(input));
 }
 
 export function isPrivatePostCancelText(input: string) {
-  return /^(?:#|＃|\/)?\s*(?:取消|取消本次投稿)\s*$/.test(input.trim());
+  return /^(?:取消|取消投稿|取消本次投稿|不投了|不发了|算了|放弃|放弃投稿)$/.test(normalizeControlText(input));
 }
 
 export function isPrivatePostUndoText(input: string) {
-  return /^(?:#|＃|\/)?\s*(?:撤回|撤回上一条|撤回上一步)\s*$/.test(input.trim());
+  return /^(?:撤回|撤回上一条|撤回上一步|删除上一条|删掉刚才|上一条不要了)$/.test(normalizeControlText(input));
 }
 
 export function parsePrivatePostModeText(input: string) {
-  const match = input.trim().match(/^(?:#|＃|\/)?\s*(匿名|实名)(?:投稿)?\s*$/);
+  const normalized = normalizeControlText(input);
+  if (/^(?:匿名|匿名投稿|不显示名字|不要显示名字|隐藏名字|隐藏昵称|不公开身份|匿名发)$/.test(normalized)) {
+    return { anonymous: true };
+  }
+  if (/^(?:实名|实名投稿|显示名字|显示昵称|不匿名|公开身份|实名发)$/.test(normalized)) {
+    return { anonymous: false };
+  }
+  return null;
+}
+
+export function parsePrivatePostStartModeText(input: string) {
+  const trimmed = stripZeroWidthChars(input).trim().replace(/^(?:#|＃|\/)\s*/, "");
+  const match = trimmed.match(/^(匿名|实名)投稿(?:$|[\s:：])/);
   if (!match) {
     return null;
   }
-
-  return {
-    anonymous: match[1] === "匿名",
-  };
+  return { anonymous: match[1] === "匿名" };
 }
 
 export function parsePrivatePostConfirmText(input: string) {
-  const trimmed = input.trim();
-  if (/^(?:#|＃|\/)?\s*确认\s*$/.test(trimmed)) {
+  const normalized = normalizeControlText(input);
+  if (isPrivatePostFinishText(input) || /^(?:确认|确认投稿|确定|可以|没问题|没问题了|发吧|发布|提交|就这样|按这个发|可以发|可以发布|可以提交)$/.test(normalized)) {
     return { confirmed: true };
   }
-  if (/^(?:#|＃|\/)?\s*(?:取消|取消提交|取消本次投稿)\s*$/.test(trimmed)) {
+  if (/^(?:取消|取消提交|取消本次投稿|不发了|不投了|算了|放弃)$/.test(normalized)) {
     return { confirmed: false };
   }
   return null;
+}
+
+export function isPrivatePostEditText(input: string) {
+  return /^(?:修改|再改一下|重新修改|返回修改|继续修改|先改一下)$/.test(normalizeControlText(input));
+}
+
+export function resolvePrivatePostSubmissionText(text: string, attachmentCount: number) {
+  const normalized = text.trim();
+  return stripZeroWidthChars(normalized).trim() ? normalized : attachmentCount > 0 ? "投稿" : "";
+}
+
+export function shouldAutoRegisterPrivateText(text: string) {
+  return stripZeroWidthChars(text).trim().length > 0;
 }
 
 export type PrivatePostManagementCommand =

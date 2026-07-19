@@ -144,7 +144,7 @@ describe("private post semantic mode selection", () => {
     expect(parsePrivatePostConfirmText("#取消")).toEqual({ confirmed: false });
     expect(parsePrivatePostConfirmText("确认")).toEqual({ confirmed: true });
     expect(parsePrivatePostConfirmText("取消")).toEqual({ confirmed: false });
-    expect(parsePrivatePostConfirmText("可以提交")).toBeNull();
+    expect(parsePrivatePostConfirmText("可以提交")).toEqual({ confirmed: true });
   });
 
   test("AI 确认提交阶段使用语义确认或取消", () => {
