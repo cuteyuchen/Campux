@@ -185,32 +185,31 @@ export const publishWaitingResumeHint = "系统不会继续发布这条稿件，
 
 // ── 注册成功 ──────────────────────────────────────────
 
+const formatPostingEntryGuidance = (loginUrl: string) => [
+  "发送“投稿”开始对话投稿。",
+  `也可以登录网站投稿：${loginUrl}`,
+].join("\n");
+
 const registerSuccessDefault = (password: string, loginUrl: string) => [
-  "注册成功！",
-  "登录账号：当前 QQ",
-  `初始密码：\n${password}`,
-  `登录链接：${loginUrl}`,
-  "忘记密码时，请发送“重置密码”获取新密码。",
-  "发送“投稿”开始投稿吧~",
-].join("\n\n");
+  "检测到当前账号未注册，已自动注册。",
+  `初始密码：${password}`,
+  "",
+  formatPostingEntryGuidance(loginUrl),
+].join("\n");
 
 const registerSuccessStylish = [
   (password: string, loginUrl: string) => [
-    "🎉 注册成功！",
-    "登录账号：当前 QQ",
-    `初始密码：\n${password}`,
-    `登录链接：${loginUrl}`,
-    "忘记密码时，请发送“重置密码”获取新密码。",
-    "发送“投稿”开始投稿吧~",
-  ].join("\n\n"),
+    "🎉 检测到当前账号未注册，已自动注册。",
+    `初始密码：${password}`,
+    "",
+    formatPostingEntryGuidance(loginUrl),
+  ].join("\n"),
   (password: string, loginUrl: string) => [
-    "✅ 注册完成！",
-    "登录账号：当前 QQ",
-    `初始密码：\n${password}`,
-    `登录链接：${loginUrl}`,
-    "忘记密码时，请发送“重置密码”获取新密码。",
-    "发送“投稿”开始投稿吧~",
-  ].join("\n\n"),
+    "✅ 检测到当前账号未注册，已自动注册。",
+    `初始密码：${password}`,
+    "",
+    formatPostingEntryGuidance(loginUrl),
+  ].join("\n"),
   registerSuccessDefault,
 ];
 
@@ -220,15 +219,12 @@ export function formatRegisterSuccess(password: string, loginUrl: string, stylis
 }
 
 const registerAlreadyDefault = (loginUrl: string) => [
-  "这个 QQ 已经注册过啦。",
-  `登录链接：${loginUrl}`,
-  "忘记密码时，请发送“重置密码”获取新密码。",
-  "发送“投稿”开始投稿吧~",
-].join("\n");
+  "当前账号已经注册。",
+  formatPostingEntryGuidance(loginUrl),
+].join("\n\n");
 
 const registerAlreadyStylish = [
-  (loginUrl: string) => `🤔 这个 QQ 早就注册过了呀~\n登录链接：${loginUrl}\n忘记密码时，请发送“重置密码”获取新密码。\n发送“投稿”开始投稿吧~`,
-  (loginUrl: string) => `📌 已经注册过啦。\n登录链接：${loginUrl}\n忘记密码时，请发送“重置密码”获取新密码。\n发送“投稿”开始投稿吧~`,
+  (loginUrl: string) => `📌 当前账号已经注册。\n\n${formatPostingEntryGuidance(loginUrl)}`,
   registerAlreadyDefault,
 ];
 
@@ -238,14 +234,12 @@ export function formatRegisterAlready(loginUrl: string, stylishEnabled = false):
 }
 
 const registerExtendedDefault = (loginUrl: string) => [
-  "已经帮你开通本校园墙的访问权限了，登录密码沿用原账号。",
-  `登录链接：${loginUrl}`,
-  "忘记密码时，请发送“重置密码”获取新密码。",
-  "发送“投稿”开始投稿吧~",
-].join("\n");
+  "已自动开通当前墙权限，登录密码沿用原账号。",
+  formatPostingEntryGuidance(loginUrl),
+].join("\n\n");
 
 const registerExtendedStylish = [
-  (loginUrl: string) => `🔓 已开通本墙权限，登录密码沿用原账号。\n登录链接：${loginUrl}\n忘记密码时，请发送“重置密码”获取新密码。\n发送“投稿”开始投稿吧~`,
+  (loginUrl: string) => `🔓 已自动开通当前墙权限，登录密码沿用原账号。\n\n${formatPostingEntryGuidance(loginUrl)}`,
   registerExtendedDefault,
 ];
 
@@ -271,9 +265,9 @@ export function formatPrivatePostAutoRegistrationNotice(
 ): string | null {
   if (result.alreadyHadTenantAccess) return null;
   if (result.password) {
-    return `您未注册当前墙，已自动注册，初始密码为 ${result.password}。您可以登录网站投稿，也可以在当前对话投稿。\n登录链接：${loginUrl}`;
+    return `检测到当前账号未注册，已自动注册。\n初始密码：${result.password}\n\n${formatPostingEntryGuidance(loginUrl)}`;
   }
-  return `您未注册当前墙，已自动开通当前墙权限，登录密码沿用原账号。您可以登录网站投稿，也可以在当前对话投稿。\n登录链接：${loginUrl}`;
+  return `已自动开通当前墙权限，登录密码沿用原账号。\n\n${formatPostingEntryGuidance(loginUrl)}`;
 }
 
 const privatePostStatusLabels: Record<string, string> = {
@@ -761,27 +755,18 @@ export function formatPrivatePostCancelled(stylishEnabled = false): string {
 // ── 对话投稿帮助 ──────────────────────────────────────
 
 const privateHelpDefault = [
-  "西峡一高表白墙自助投稿助手",
-  "首次发送任意文字会自动注册当前墙，并回复初始密码。",
-  "已注册用户直接发送“投稿”进入对话投稿，或登录网站投稿：",
-  "https://xxyg.cuteyuchen.top",
-  "忘记密码可发送“重置密码”。以上命令均不需要 # 前缀。",
+  "发送“投稿”开始对话投稿。",
+  "也可以登录网站投稿：https://xxyg.cuteyuchen.top",
 ].join("\n");
 
 const privateHelpStylish = [
   [
-    "📮 西峡一高表白墙自助投稿助手",
-    "发送任意文字即可自动注册并获取初始密码。",
-    "发送“投稿”开始对话投稿，也可以登录网站投稿：",
-    "https://xxyg.cuteyuchen.top",
-    "忘记密码发送“重置密码”；命令不需要 # 前缀。",
+    "📮 发送“投稿”开始对话投稿。",
+    "也可以登录网站投稿：https://xxyg.cuteyuchen.top",
   ].join("\n"),
   [
-    "✨ 欢迎使用西峡一高表白墙",
-    "首次发送文字会自动注册并回复初始密码。",
-    "发送“投稿”即可开始，或登录网站投稿：",
-    "https://xxyg.cuteyuchen.top",
-    "忘记密码发送“重置密码”；无需输入 #。",
+    "✨ 发送“投稿”即可开始对话投稿。",
+    "网站投稿：https://xxyg.cuteyuchen.top",
   ].join("\n"),
   privateHelpDefault,
 ];
@@ -792,12 +777,21 @@ export function formatPrivateHelp(stylishEnabled = false): string {
 }
 
 const legacyPrivateAutoRegistrationReply = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
+const verbosePrivateHelpMarkers = [
+  "西峡一高表白墙自助投稿助手",
+  "首次发送任意文字会自动注册当前墙",
+  "发送“稿件”或“历史投稿”",
+  "如有系统使用问题，请联系 QQ 1249882361",
+];
 
 export function formatConfiguredPrivateHelp(configured: string | null | undefined, stylishEnabled = false): string {
-  if (!configured?.trim() || configured.trim() === legacyPrivateAutoRegistrationReply) {
+  const normalized = configured?.trim();
+  if (!normalized
+    || normalized === legacyPrivateAutoRegistrationReply
+    || verbosePrivateHelpMarkers.every((marker) => normalized.includes(marker))) {
     return formatPrivateHelp(stylishEnabled);
   }
-  return configured;
+  return normalized;
 }
 
 // ── 私信回复 ──────────────────────────────────────────

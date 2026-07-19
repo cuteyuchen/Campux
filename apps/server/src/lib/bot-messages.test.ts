@@ -24,14 +24,14 @@ import {
 
 const loginUrl = "https://wall.campux.top/login";
 
-function expectLoginAndForgotPasswordGuidance(message: string) {
-  expect(message).toContain(`登录链接：${loginUrl}`);
-  expect(message).toContain("忘记密码时");
-  expect(message).toContain("重置密码");
+function expectPostingEntryGuidance(message: string) {
+  expect(message).toContain(loginUrl);
+  expect(message).toContain("对话投稿");
+  expect(message).toContain("网站投稿");
 }
 
 describe("bot registration messages", () => {
-  test("new-account notice always includes initial password, login link, and forgotten-password reset instructions", () => {
+  test("new-account notice only includes the initial password and two posting entries", () => {
     const originalRandom = Math.random;
     try {
       for (const stylishEnabled of [false, true]) {
@@ -40,7 +40,9 @@ describe("bot registration messages", () => {
           const message = formatRegisterSuccess("InitPass9", loginUrl, stylishEnabled);
 
           expect(message).toContain("InitPass9");
-          expectLoginAndForgotPasswordGuidance(message);
+          expect(message).toContain("已自动注册");
+          expectPostingEntryGuidance(message);
+          expect(message).not.toContain("重置密码");
         }
       }
     } finally {
@@ -52,14 +54,14 @@ describe("bot registration messages", () => {
     const message = formatRegisterExtended(loginUrl, false);
 
     expect(message).toContain("沿用原账号");
-    expectLoginAndForgotPasswordGuidance(message);
+    expectPostingEntryGuidance(message);
   });
 
   test("explicit registration command for an existing member still gives the login link", () => {
-    expectLoginAndForgotPasswordGuidance(formatRegisterAlready(loginUrl, false));
+    expectPostingEntryGuidance(formatRegisterAlready(loginUrl, false));
   });
 
-  test("default help only guides registration and website/chat posting", () => {
+  test("default help only shows website and chat posting entries", () => {
     const originalRandom = Math.random;
     try {
       for (const stylishEnabled of [false, true]) {
@@ -67,10 +69,11 @@ describe("bot registration messages", () => {
           Math.random = () => randomValue;
           const message = formatPrivateHelp(stylishEnabled);
 
-          expect(message).toContain("自动注册");
-          expect(message).toContain("重置密码");
           expect(message).toContain("xxyg.cuteyuchen.top");
-          expect(message).toContain("投稿");
+          expect(message).toContain("对话投稿");
+          expect(message).toContain("网站投稿");
+          expect(message).not.toContain("自动注册");
+          expect(message).not.toContain("重置密码");
           expect(message).not.toContain("历史投稿");
           expect(message).not.toContain("撤回");
           expect(message).not.toContain("#注册账号");
@@ -92,16 +95,17 @@ describe("bot registration messages", () => {
 
   test("posting auto-registration notice includes the initial password and posting choices", () => {
     const message = formatPrivatePostAutoRegistrationNotice({ password: "InitPass9", alreadyHadTenantAccess: false }, loginUrl);
-    expect(message).toContain("您未注册当前墙，已自动注册");
+    expect(message).toContain("检测到当前账号未注册，已自动注册");
     expect(message).toContain("InitPass9");
-    expect(message).toContain("登录网站投稿");
-    expect(message).toContain("当前对话投稿");
+    expectPostingEntryGuidance(message!);
     expect(formatPrivatePostAutoRegistrationNotice({ password: null, alreadyHadTenantAccess: true }, loginUrl)).toBeNull();
   });
 
   test("legacy first-private auto-registration copy is replaced by the current help", () => {
     const legacy = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
+    const verbose = "西峡一高表白墙自助投稿助手\n首次发送任意文字会自动注册当前墙，机器人会回复初始密码。\n发送“稿件”或“历史投稿”可查看最近 5 条投稿及状态。\n如有系统使用问题，请联系 QQ 1249882361。";
     expect(formatConfiguredPrivateHelp(legacy, false)).toBe(formatPrivateHelp(false));
+    expect(formatConfiguredPrivateHelp(verbose, false)).toBe(formatPrivateHelp(false));
     expect(formatConfiguredPrivateHelp("自定义回复", false)).toBe("自定义回复");
   });
 });

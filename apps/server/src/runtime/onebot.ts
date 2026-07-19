@@ -204,6 +204,7 @@ type PrivatePostAggregateBuffer = {
   timer: Timer | null;
   typingTimer: Timer | null;
   userTyping: boolean;
+  suppressAutoReply: boolean;
 };
 
 type OneBotMessageEvent = {
@@ -1473,6 +1474,7 @@ export class OneBotRuntime {
             userNickname: event.sender?.card || event.sender?.nickname || userQqUin,
             event,
             delaySeconds: privatePostAggregateDelaySeconds,
+            suppressAutoReply: registrationNotice !== null,
           });
           return;
         }
@@ -1532,7 +1534,7 @@ export class OneBotRuntime {
         }
 
         // 保留原有自动回复
-        if (this.shouldSendPrivateAutoReply(bot.id, userQqUin, bot.userMessageReplyCooldownSeconds)) {
+        if (!registrationNotice && this.shouldSendPrivateAutoReply(bot.id, userQqUin, bot.userMessageReplyCooldownSeconds)) {
           const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
           await this.sendPrivateMessage(botQqUin, userQqUin, formatConfiguredPrivateHelp(bot.userMessageReply, stylishEnabled)).catch(() => undefined);
         }
@@ -3145,6 +3147,7 @@ export class OneBotRuntime {
     userNickname,
     event,
     delaySeconds,
+    suppressAutoReply,
   }: {
     bot: { id: string; tenantId: string; qqUin: bigint; displayName?: string | null; reviewGroupId: string | null; userMessageReply: string | null; userMessageReplyCooldownSeconds: number };
     botQqUin: string;
@@ -3152,6 +3155,7 @@ export class OneBotRuntime {
     userNickname: string;
     event: OneBotMessageEvent;
     delaySeconds: number;
+    suppressAutoReply: boolean;
   }) {
     const key = this.getPrivatePostDraftKey(botQqUin, userQqUin);
     let buffer = this.privatePostAggregateBuffers.get(key);
@@ -3169,12 +3173,14 @@ export class OneBotRuntime {
         timer: null,
         typingTimer: null,
         userTyping: false,
+        suppressAutoReply,
       };
       this.privatePostAggregateBuffers.set(key, buffer);
     }
     buffer.bot = bot;
     buffer.userNickname = userNickname;
     buffer.delayMs = delaySeconds * 1000;
+    buffer.suppressAutoReply ||= suppressAutoReply;
     buffer.events.push(event);
     buffer.messages.push({ time: Math.floor(Date.now() / 1000), text, segments: extractOneBotMessageSegments(event.message) });
     this.schedulePrivatePostAggregateFlush(key, buffer);
@@ -3275,7 +3281,7 @@ export class OneBotRuntime {
         });
       }
     }
-    if (this.shouldSendPrivateAutoReply(buffer.bot.id, buffer.userQqUin, buffer.bot.userMessageReplyCooldownSeconds)) {
+    if (!buffer.suppressAutoReply && this.shouldSendPrivateAutoReply(buffer.bot.id, buffer.userQqUin, buffer.bot.userMessageReplyCooldownSeconds)) {
       const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, buffer.tenantId);
       await this.sendPrivateMessage(buffer.botQqUin, buffer.userQqUin, formatConfiguredPrivateHelp(buffer.bot.userMessageReply, stylishEnabled)).catch(() => undefined);
     }
