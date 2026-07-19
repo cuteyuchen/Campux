@@ -59,7 +59,7 @@ describe("bot registration messages", () => {
     expectLoginAndForgotPasswordGuidance(formatRegisterAlready(loginUrl, false));
   });
 
-  test("default help explains automatic registration and reserves password reset for forgotten passwords", () => {
+  test("default help only guides registration and website/chat posting", () => {
     const originalRandom = Math.random;
     try {
       for (const stylishEnabled of [false, true]) {
@@ -69,7 +69,10 @@ describe("bot registration messages", () => {
 
           expect(message).toContain("自动注册");
           expect(message).toContain("重置密码");
-          expect(message).toContain("历史投稿");
+          expect(message).toContain("xxyg.cuteyuchen.top");
+          expect(message).toContain("投稿");
+          expect(message).not.toContain("历史投稿");
+          expect(message).not.toContain("撤回");
           expect(message).not.toContain("#注册账号");
         }
       }
