@@ -27,6 +27,7 @@ import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedErro
 import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
 import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled } from "../lib/tenant-metadata";
+import { findTenantBlockedWordsInText, formatBlockedWordsError } from "../lib/blocked-words";
 import {
   buildImageSourceSizeErrorMessage,
   imageStorageHardMaxBytes,
@@ -2456,6 +2457,11 @@ export class OneBotRuntime {
     }
     if (text.length > 1_000) {
       throw new BotWorkflowError("正文太长了，请控制在 1000 字以内，再发送“结束”。", 400);
+    }
+
+    const blockedWords = await findTenantBlockedWordsInText(prisma, bot.tenantId, text);
+    if (blockedWords.length > 0) {
+      throw new BotWorkflowError(formatBlockedWordsError(blockedWords), 400);
     }
 
     // 注入检测：XSS、CSS、代码、CQ 码

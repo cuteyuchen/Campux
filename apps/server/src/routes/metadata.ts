@@ -43,6 +43,13 @@ import {
   normalizeEnableAnonymousAvatarSelection,
 } from "../lib/tenant-metadata";
 import { maxImageMaxSizeMb, minImageMaxSizeMb, normalizeImageMaxSizeMb } from "../lib/image-upload-policy";
+import {
+  blockedWordsMetadataKey,
+  maxBlockedWordLength,
+  maxBlockedWords,
+  normalizeBlockedWords,
+  readTenantBlockedWords,
+} from "../lib/blocked-words";
 
 const publicMetadataKeys = [
   "brand",
@@ -76,6 +83,7 @@ const patchMetadataSchema = z.object({
   banner: z.string().optional(),
   logoUrl: z.string().trim().max(1000).refine((value) => value === "" || /^https?:\/\//i.test(value) || value.startsWith("/"), "Logo URL 必须是 http(s) 或站内路径").optional(),
   postRules: z.array(z.string().min(1)).optional(),
+  blockedWords: z.array(z.string().trim().max(maxBlockedWordLength)).max(maxBlockedWords).optional(),
   pendingPostLimit: z.number().int().min(0).max(maxPendingPostLimit).optional(),
   services: z.array(
     z.object({
@@ -218,6 +226,13 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
     return readPublicMetadata(context.selectedTenant.id);
   });
 
+  app.get("/api/admin/tenant/blocked-words", async (request, reply) => {
+    const context = await requireTenantRole(request, reply, "admin");
+    return {
+      blockedWords: await readTenantBlockedWords(prisma, context.selectedTenant.id),
+    };
+  });
+
   app.post("/api/admin/tenant/logo", async (request, reply) => {
     const context = await requireTenantRole(request, reply, "admin");
     let uploadedLogoUrl = "";
@@ -341,6 +356,9 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
     }
     if (body.postRules !== undefined) {
       updates.push({ key: "post_rules", value: body.postRules });
+    }
+    if (body.blockedWords !== undefined) {
+      updates.push({ key: blockedWordsMetadataKey, value: normalizeBlockedWords(body.blockedWords) });
     }
     if (body.pendingPostLimit !== undefined) {
       updates.push({ key: pendingPostLimitMetadataKey, value: body.pendingPostLimit });

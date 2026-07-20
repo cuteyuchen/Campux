@@ -13,6 +13,7 @@ import { buildPublishedFeed, filterPublishedFeedByTag, type BatchFeedInput, type
 import { serializeAssignedPostTags } from "../lib/post-tags";
 import { prisma } from "../lib/prisma";
 import { readTenantPendingPostLimit, readTenantImageCompression } from "../lib/tenant-metadata";
+import { findTenantBlockedWordsInText, formatBlockedWordsError } from "../lib/blocked-words";
 import {
   buildImageSourceSizeErrorMessage,
   convertedVideoGifSizeErrorMessage,
@@ -472,6 +473,14 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         throw {
           status: 400,
           message: "正文最多 1000 字",
+        };
+      }
+
+      const blockedWords = await findTenantBlockedWordsInText(prisma, context.selectedTenant.id, text);
+      if (blockedWords.length > 0) {
+        throw {
+          status: 400,
+          message: formatBlockedWordsError(blockedWords),
         };
       }
 

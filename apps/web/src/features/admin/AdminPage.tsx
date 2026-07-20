@@ -333,6 +333,7 @@ export function AdminPage({
   onSaved: () => Promise<void>;
 }) {
   const [form, setForm] = useState<TenantSettingsForm>(() => toForm(selectedTenant, metadata));
+  const [blockedWordsText, setBlockedWordsText] = useState("");
   const [imageMaxSizeDraft, setImageMaxSizeDraft] = useState(() => String(metadata.imageMaxSizeMb));
   const [aiSettings, setAiSettings] = useState<TenantAiSettings | null>(null);
   const [aiForm, setAiForm] = useState<AiSettingsForm | null>(null);
@@ -385,6 +386,10 @@ export function AdminPage({
     setForm(nextForm);
     setImageMaxSizeDraft(String(nextForm.imageMaxSizeMb));
   }, [selectedTenant.id, selectedTenant.slug, selectedTenant.name, selectedTenant.themeColor, metadata.brand, metadata.banner, metadata.logoUrl, metadata.pendingPostLimit, metadata.postRules, metadata.services, metadata.imageCompression.enabled, metadata.imageCompression.quality, metadata.imageCompression.maxDimension, metadata.imageMaxSizeMb, metadata.publishMode, metadata.publishAccumulate.minImages, metadata.publishAccumulate.maxImages, metadata.publishAccumulate.staleMinutes, metadata.publishLlmSummaryEnabled, metadata.enableAnonymousAvatarSelection]);
+
+  useEffect(() => {
+    setBlockedWordsText("");
+  }, [selectedTenant.id]);
 
   useEffect(() => {
     if (activeTab === "users") {
@@ -464,7 +469,7 @@ export function AdminPage({
   async function refreshAdminData() {
     setAdminLoading(true);
     try {
-      const [memberData, botData, targetData, attemptData, banData, oauthSettingsData, oauthClientData, aiSettingsData] = await Promise.all([
+      const [memberData, botData, targetData, attemptData, banData, oauthSettingsData, oauthClientData, aiSettingsData, blockedWordsData] = await Promise.all([
         fetchMembers(memberPage),
         api<{ bots: AdminBotAccount[]; events: AdminBotEvent[] }>("/api/admin/bots"),
         api<{ targets: PublishTargetItem[] }>("/api/admin/publish-targets"),
@@ -473,6 +478,7 @@ export function AdminPage({
         api<OAuthClientSettingsResponse>("/api/admin/oauth/settings"),
         api<{ clients: OAuthClientItem[] }>("/api/admin/oauth/clients"),
         api<{ settings: TenantAiSettings }>("/api/admin/ai/settings"),
+        api<{ blockedWords: string[] }>("/api/admin/tenant/blocked-words"),
       ]);
       setMembers(memberData.members);
       setMemberPagination(memberData.pagination);
@@ -486,6 +492,7 @@ export function AdminPage({
       setOAuthClients(oauthClientData.clients);
       setAiSettings(aiSettingsData.settings);
       setAiForm(aiSettingsToForm(aiSettingsData.settings));
+      setBlockedWordsText(blockedWordsData.blockedWords.join("\n"));
     } finally {
       setAdminLoading(false);
     }
@@ -556,6 +563,7 @@ export function AdminPage({
           logoUrl: form.logoUrl.trim(),
           pendingPostLimit: form.pendingPostLimit,
           postRules: form.postRulesText.split(/\r?\n/).map((rule) => rule.trim()).filter(Boolean),
+          blockedWords: blockedWordsText.split(/\r?\n/).map((word) => word.trim()).filter(Boolean),
           services: prepareServiceEntriesForSave(form.services),
           imageCompressionEnabled: form.imageCompressionEnabled,
           imageCompressionQuality: form.imageCompressionQuality,
@@ -1176,9 +1184,11 @@ export function AdminPage({
               <div className="flex flex-col gap-4">
                 <MetadataPanel
                   form={form}
+                  blockedWordsText={blockedWordsText}
                   imageMaxSizeDraft={imageMaxSizeDraft}
                   busy={busy}
                   onFormChange={setForm}
+                  onBlockedWordsTextChange={setBlockedWordsText}
                   onImageMaxSizeDraftChange={setImageMaxSizeDraft}
                   onImageMaxSizeDraftCommit={() => {
                     const normalized = normalizeImageMaxSizeDraft(imageMaxSizeDraft, form.imageMaxSizeMb);
@@ -1741,18 +1751,22 @@ function BansPanel({
 
 function MetadataPanel({
   form,
+  blockedWordsText,
   imageMaxSizeDraft,
   busy,
   onFormChange,
+  onBlockedWordsTextChange,
   onImageMaxSizeDraftChange,
   onImageMaxSizeDraftCommit,
   onSave,
   onUploaded,
 }: {
   form: TenantSettingsForm;
+  blockedWordsText: string;
   imageMaxSizeDraft: string;
   busy: boolean;
   onFormChange: (form: TenantSettingsForm) => void;
+  onBlockedWordsTextChange: (value: string) => void;
   onImageMaxSizeDraftChange: (value: string) => void;
   onImageMaxSizeDraftCommit: () => void;
   onSave: () => void;
@@ -1796,7 +1810,7 @@ function MetadataPanel({
   return (
     <Card className="rounded-md border-slate-200 bg-white shadow-none">
       <CardContent className="p-4">
-        <PanelTitle icon={MegaphoneIcon} title="墙面设置" description="校园墙名称、公告、Logo、投稿规则和服务入口" color="product-accent-green" />
+        <PanelTitle icon={MegaphoneIcon} title="墙面设置" description="校园墙名称、公告、Logo、投稿规则、违禁词和服务入口" color="product-accent-green" />
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <label className="grid gap-1 text-sm font-medium">
             校园墙名称
@@ -2088,6 +2102,16 @@ function MetadataPanel({
           <label className="grid gap-1 text-sm font-medium md:col-span-2">
             投稿规则，每行一条
             <Textarea className="min-h-32" value={form.postRulesText} onChange={(event) => onFormChange({ ...form, postRulesText: event.target.value })} />
+          </label>
+          <label className="grid gap-1 text-sm font-medium md:col-span-2">
+            投稿违禁词，每行一个词
+            <Textarea
+              className="min-h-32"
+              value={blockedWordsText}
+              disabled={busy}
+              onChange={(event) => onBlockedWordsTextChange(event.target.value)}
+            />
+            <span className="text-xs font-normal text-slate-500">每行一个词，投稿内容命中后将无法提交。</span>
           </label>
           <section className="overflow-hidden rounded-md border border-slate-200 bg-slate-50 md:col-span-2">
             <div className="flex flex-col gap-3 border-b border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
