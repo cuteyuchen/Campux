@@ -57,6 +57,7 @@ import {
   formatReviewApproved,
   formatReviewRejected,
   formatPublishSuccess,
+  formatAuthorPublishSuccess,
   formatPublishSuccessWithTarget,
   formatPublishFailed,
   publishFailedLoginHint,
@@ -580,6 +581,39 @@ export class OneBotRuntime {
       return;
     }
     await this.sendBotReviewGroupMessage(target.botAccount, formatPublishSuccessWithTarget(post.displayId, target.displayName, externalId, stylishEnabled), "failed to notify publish succeeded");
+  }
+
+  
+  async notifyAuthorPublishSucceeded(postId: string) {
+    const post = await prisma.post.findUnique({
+      where: { id: postId },
+      include: { author: true },
+    });
+    if (!post) {
+      return;
+    }
+    const bots = await prisma.botAccount.findMany({
+      where: {
+        tenantId: post.tenantId,
+        enabled: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+    if (bots.length === 0) {
+      return;
+    }
+    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
+    const message = formatAuthorPublishSuccess(post.displayId, stylishEnabled);
+    for (const bot of bots) {
+      await this.sendPrivateMessage(bot.qqUin.toString(), post.author.qqUin, message).catch((error) => {
+        this.logger.warn(
+          { error, botQqUin: bot.qqUin.toString(), userQqUin: post.author.qqUin.toString(), postId },
+          "failed to notify author publish succeeded",
+        );
+      });
+    }
   }
 
   async notifyPublishFailed(postId: string, targetId: string, message: string, options?: { needsLogin?: boolean; nextRunAt?: Date | null }) {

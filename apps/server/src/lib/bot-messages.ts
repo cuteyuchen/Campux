@@ -120,6 +120,19 @@ export function formatPublishSuccess(displayId: number, externalId: string, styl
   return pick(publishSuccessStylish)(displayId, externalId);
 }
 
+/** 投稿人私聊：发布成功（不含外部 ID / 墙号细节） */
+export function formatAuthorPublishSuccess(displayId: number, stylishEnabled = false): string {
+  if (!stylishEnabled) {
+    return `已成功发表：#${displayId}`;
+  }
+  return pick([
+    (id: number) => `🚀 发射成功！#${id} 已上墙~`,
+    (id: number) => `🎯 稿件 #${id} 发布成功！`,
+    (id: number) => `✅ 发表完毕：#${id}`,
+    (id: number) => `已成功发表：#${id}`,
+  ])(displayId);
+}
+
 // ── 发布成功（含目标名称） ─────────────────────────────
 
 const publishSuccessWithTargetDefault = (id: number, target: string, externalId: string) =>

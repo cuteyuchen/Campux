@@ -35,6 +35,7 @@ type PublishScheduleClient = typeof prisma | Prisma.TransactionClient;
 
 type PublishingNotifier = {
   notifyPublishSucceeded(postId: string, targetId: string, externalId: string): Promise<void>;
+  notifyAuthorPublishSucceeded?(postId: string): Promise<void>;
   notifyPublishFailed(postId: string, targetId: string, message: string, options?: { needsLogin?: boolean; nextRunAt?: Date | null }): Promise<void>;
   notifyPublishWaitingForCookies?(postId: string, targetId: string, message: string): Promise<void>;
   notifyQZoneCookiesInvalid?(botAccountId: string, message: string, options?: { autoRefreshError?: string | null }): Promise<void>;
@@ -912,7 +913,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
           logger.warn({ error, postId: target.id, publishTargetId: attempt.publishTargetId }, "failed to notify publish success");
         });
       }
-      await refreshAttemptPostStatuses(attempt);
+      await refreshAttemptPostStatuses(attempt, notifier);
       return;
     }
 
@@ -930,7 +931,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
       notifier,
     });
     if (!cookies) {
-      await refreshAttemptPostStatuses(attempt);
+      await refreshAttemptPostStatuses(attempt, notifier);
       return;
     }
     await prisma.publishAttempt.update({
@@ -1097,7 +1098,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
         await notifier.notifyPublishFailed(attempt.postId, attempt.publishTargetId, `QZone cookies 已通过协议自动刷新，将自动重试发布。原始错误：${message}`, { nextRunAt }).catch((error) => {
           logger.warn({ error, postId: attempt.postId, publishTargetId: attempt.publishTargetId }, "failed to notify publish auto refresh retry");
         });
-        await refreshAttemptPostStatuses(attempt);
+        await refreshAttemptPostStatuses(attempt, notifier);
         return;
       } catch (refreshError) {
         if (isQZoneProtocolAutoRefreshCooldownError(refreshError)) {
@@ -1153,7 +1154,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
     }
   }
 
-  await refreshAttemptPostStatuses(attempt);
+  await refreshAttemptPostStatuses(attempt, notifier);
 }
 
 async function resolveCookiesForPublish({
@@ -1375,7 +1376,7 @@ export function deriveAggregateStatus(attempts: AggregateAttempt[]): { status: P
   return null;
 }
 
-async function refreshAggregatePostStatus(postId: string) {
+async function refreshAggregatePostStatus(postId: string, notifier?: PublishingNotifier) {
   const post = await prisma.post.findUnique({
     where: {
       id: postId,
@@ -1401,7 +1402,7 @@ async function refreshAggregatePostStatus(postId: string) {
   if (!derived) {
     return;
   }
-  await updatePostAggregateStatus(post.id, post.tenantId, post.status, derived.status, derived.comment);
+  await updatePostAggregateStatus(post.id, post.tenantId, post.status, derived.status, derived.comment, notifier);
 }
 
 const batchStatusFromPostStatus: Record<string, "publishing" | "published" | "partially_failed" | "failed"> = {
@@ -1415,7 +1416,7 @@ const batchStatusFromPostStatus: Record<string, "publishing" | "published" | "pa
  * 批量模式：批次内每条稿件共享同一组 batch attempt 的结果。
  * 据 batch.attempts 推导聚合状态，应用到批次内每条 post，并同步推进 PublishBatch.status。
  */
-async function refreshBatchPostStatuses(batchId: string) {
+async function refreshBatchPostStatuses(batchId: string, notifier?: PublishingNotifier) {
   const batch = await prisma.publishBatch.findUnique({
     where: { id: batchId },
     include: {
@@ -1442,7 +1443,7 @@ async function refreshBatchPostStatuses(batchId: string) {
   }
 
   for (const item of batch.items) {
-    await updatePostAggregateStatus(item.post.id, item.post.tenantId, item.post.status, derived.status, derived.comment);
+    await updatePostAggregateStatus(item.post.id, item.post.tenantId, item.post.status, derived.status, derived.comment, notifier);
   }
 
   const batchStatus = batchStatusFromPostStatus[derived.status];
@@ -1457,15 +1458,22 @@ async function refreshBatchPostStatuses(batchId: string) {
 /**
  * 刷新一个 attempt 影响到的所有稿件状态：批量 attempt 刷新整批，单稿 attempt 刷新单稿。
  */
-async function refreshAttemptPostStatuses(attempt: { postId: string; batchId: string | null }) {
+async function refreshAttemptPostStatuses(attempt: { postId: string; batchId: string | null }, notifier?: PublishingNotifier) {
   if (attempt.batchId) {
-    await refreshBatchPostStatuses(attempt.batchId);
+    await refreshBatchPostStatuses(attempt.batchId, notifier);
     return;
   }
-  await refreshAggregatePostStatus(attempt.postId);
+  await refreshAggregatePostStatus(attempt.postId, notifier);
 }
 
-async function updatePostAggregateStatus(postId: string, tenantId: string, oldStatus: PostStatus, newStatus: PostStatus, comment: string) {
+async function updatePostAggregateStatus(
+  postId: string,
+  tenantId: string,
+  oldStatus: PostStatus,
+  newStatus: PostStatus,
+  comment: string,
+  notifier?: PublishingNotifier,
+) {
   if (oldStatus === newStatus) {
     return;
   }
@@ -1489,6 +1497,7 @@ async function updatePostAggregateStatus(postId: string, tenantId: string, oldSt
 
   if (newStatus === "published") {
     await autoFollowOwnPostOnPublish(postId, tenantId).catch(() => undefined);
+    await notifier?.notifyAuthorPublishSucceeded?.(postId).catch(() => undefined);
   }
 }
 

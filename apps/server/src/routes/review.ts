@@ -219,6 +219,9 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
     } else {
       await enqueuePublishFanout(queue, context.selectedTenant.id, post.id, context.user.id);
     }
+    oneBot?.notifyReviewResult(post.id, "approved", body.comment?.trim() || null).catch((error) => {
+      app.log.warn({ error, postId: post.id }, "failed to notify review approval");
+    });
 
     return {
       ok: true,
@@ -282,6 +285,9 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
       } else {
         await enqueuePublishFanout(queue, context.selectedTenant.id, post.id, context.user.id);
       }
+      oneBot?.notifyReviewResult(post.id, "approved").catch((error) => {
+        app.log.warn({ error, postId: post.id }, "failed to notify review approval");
+      });
       approved += 1;
     }
 
