@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TenantSummary } from "@campux/domain";
 import { toast } from "sonner";
 import { api, createPostWithAttachments, CreatePostError } from "@/lib/api";
 import { canAccess, defaultMetadata, navItems } from "@/lib/app-model";
+import {
+  canAcceptAttachmentSelection,
+  runWhenSubmissionIdle,
+} from "@/lib/attachment-upload-state";
 import { readQueryInt, writeQueryParams } from "@/lib/url-query";
+import { buildLoginPathWithReturnTo, readLoginReturnTo, readOAuthAuthorizeSearchFromReturnTo } from "@/lib/oauth-login-return";
 import type { ActiveBan, AdminTab, AuthenticatedMe, CurrentMembership, MainTab, MeResponse, OAuthAuthorizeClientResponse, Pagination, PostItem, PostsTab, TenantMetadata } from "@/types/app";
 import { usePendingAttachments } from "@/hooks/useUploadImages";
 import { LoadingScreen } from "@/features/auth/LoadingScreen";
@@ -20,7 +25,8 @@ import { AppShell } from "@/features/shell/AppShell";
 
 type AppRoute =
   | { kind: "tenant"; tab: MainTab; subTab?: AdminTab | PostsTab }
-  | { kind: "login" | "tenants" | "ops" }
+  | { kind: "login"; returnTo?: string }
+  | { kind: "tenants" | "ops" }
   | { kind: "oauth"; search: string };
 
 type SelectTenantResponse = {
@@ -99,6 +105,7 @@ export function App() {
   const [adminUserDetailTarget, setAdminUserDetailTarget] = useState<{ userId: string; nonce: number } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const submissionBusyRef = useRef(false);
   const { pending: pendingAttachments, add: addAttachments, remove: removeAttachment, validateBeforeUpload, markUploading, setProgress, markFailed, clearAll: clearAttachments } = usePendingAttachments({
     maxSizeMb: metadata.imageMaxSizeMb,
     compressionEnabled: metadata.imageCompression.enabled,
@@ -167,7 +174,7 @@ export function App() {
   function openPostDetailFromAdmin(post: { id: string; displayId: number; status: string }) {
     const params = new URLSearchParams({
       status: "all",
-      q: String(post.displayId),
+      review_q: String(post.displayId),
       post: post.id,
     });
     const path = `/posts/review?${params}`;
@@ -321,14 +328,24 @@ export function App() {
     }
 
     if (!me.authenticated) {
-      if (route.kind !== "login" && route.kind !== "oauth") {
+      if (route.kind === "oauth") {
+        const returnTo = `${window.location.pathname}${window.location.search}`;
+        const path = buildLoginPathWithReturnTo(returnTo);
+        window.history.replaceState(null, "", path);
+        setRoute({ kind: "login", returnTo });
+      } else if (route.kind !== "login") {
         navigate({ kind: "login" }, "replace");
       }
       return;
     }
 
     if (route.kind === "login") {
-      navigate(me.needsTenantSelection || !me.currentTenant ? { kind: "tenants" } : { kind: "tenant", tab: activeTab }, "replace");
+      const oauthSearch = readOAuthAuthorizeSearchFromRoute(route);
+      if (oauthSearch !== null) {
+        navigate({ kind: "oauth", search: oauthSearch }, "replace");
+      } else {
+        navigate(me.needsTenantSelection || !me.currentTenant ? { kind: "tenants" } : { kind: "tenant", tab: activeTab }, "replace");
+      }
       return;
     }
 
@@ -345,7 +362,7 @@ export function App() {
     if (route.kind === "tenant" && window.location.pathname !== pathFromRoute(route)) {
       navigate(route, "replace");
     }
-  }, [me, route.kind, route.kind === "tenant" ? route.tab : undefined, route.kind === "tenant" ? route.subTab : undefined]);
+  }, [me, route.kind, route.kind === "login" ? route.returnTo : undefined, route.kind === "tenant" ? route.tab : undefined, route.kind === "tenant" ? route.subTab : undefined]);
 
   useEffect(() => {
     document.title = buildDocumentTitle(route, documentTenantName, me?.authenticated ? me.user.systemRole : null);
@@ -363,11 +380,15 @@ export function App() {
     });
     setMe(data);
     if (data.authenticated) {
-      if (route.kind === "oauth") {
+      if (data.user.passwordChangeRequired) {
+        if (route.kind !== "login") {
+          navigate({ kind: "login" }, "replace");
+        }
         return data;
       }
-      if (data.user.passwordChangeRequired) {
-        navigate({ kind: "login" }, "replace");
+      const oauthSearch = readOAuthAuthorizeSearchFromRoute(route);
+      if (oauthSearch !== null) {
+        navigate({ kind: "oauth", search: oauthSearch }, "replace");
         return data;
       }
       navigate(data.needsTenantSelection ? { kind: "tenants" } : { kind: "tenant", tab: activeTab });
@@ -440,35 +461,56 @@ export function App() {
     await loadTenantData(1);
   }
 
+  function mutateSubmissionForm(mutation: () => void): boolean {
+    return runWhenSubmissionIdle(submissionBusyRef.current, mutation);
+  }
+
   async function handleUploadFiles(files: ArrayLike<File> | null) {
-    if (!files?.length) {
+    if (!canAcceptAttachmentSelection(submissionBusyRef.current, files?.length ?? 0)) {
       return;
     }
     addAttachments(files);
   }
 
+  function handleRemoveAttachment(attachmentId: string) {
+    mutateSubmissionForm(() => removeAttachment(attachmentId));
+  }
+
   async function submitPost() {
+    if (submissionBusyRef.current) {
+      return;
+    }
+    if (pendingAttachments.some((p) => p.status === "converting")) {
+      toast.error("请等待视频转换完成后再投稿");
+      return;
+    }
+    if (!validateBeforeUpload()) {
+      return;
+    }
     if (pendingAttachments.some((p) => p.status === "failed")) {
-      toast.error("请移除上传失败的图片后再投稿");
+      toast.error("请移除上传失败的附件后再投稿");
       return;
     }
     if (postText.trim().length === 0) {
       toast.error("正文不能为空");
       return;
     }
-    if (!validateBeforeUpload()) {
-      return;
-    }
+    const submissionAttachments = [...pendingAttachments];
+    const submissionAttachmentIds = new Set(submissionAttachments.map((attachment) => attachment.id));
+    submissionBusyRef.current = true;
     setBusy(true);
-    markUploading();
+    markUploading(submissionAttachmentIds);
     try {
-      // Local image files only (remote GIF URLs are sent separately)
-      const files = pendingAttachments
+      // Local image files only; claimed remote GIFs are sent separately.
+      const files = submissionAttachments
         .filter((p) => !p.remoteGifUrl)
         .map((p) => p.file);
-      const remoteGifUrls = pendingAttachments
-        .map((p) => p.remoteGifUrl)
-        .filter((url): url is string => Boolean(url));
+      const remoteGifClaims = submissionAttachments
+        .filter((p) => p.remoteGifUrl)
+        .map((p) => ({ url: p.remoteGifUrl!, proof: p.remoteGifProof ?? "" }));
+      const attachmentOrder = submissionAttachments.map((p) => (
+        p.remoteGifUrl ? "remote" as const : "local" as const
+      ));
       await createPostWithAttachments(
         postText,
         anonymous,
@@ -476,13 +518,14 @@ export function App() {
         (totalPercent) => {
           setProgress(totalPercent);
         },
-        remoteGifUrls.length > 0 ? remoteGifUrls : undefined,
+        remoteGifClaims.length > 0 ? remoteGifClaims : undefined,
+        attachmentOrder,
         postBgColor || undefined,
         postTextColor || undefined,
         postFont || undefined,
         anonymousAvatar || undefined,
       );
-      clearAttachments();
+      clearAttachments(submissionAttachmentIds);
       setPostText("");
       setAnonymous(false);
       setAnonymousAvatar("");
@@ -498,12 +541,18 @@ export function App() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "投稿失败";
       if (caught instanceof CreatePostError) {
-        markFailed(caught.fileIndex, message);
+        markFailed(
+          caught.fileIndex,
+          caught.remoteGifIndexes,
+          message,
+          submissionAttachments,
+        );
       } else {
-        markFailed(undefined, message);
+        markFailed(undefined, undefined, message, submissionAttachments);
       }
       toast.error(message);
     } finally {
+      submissionBusyRef.current = false;
       setBusy(false);
     }
   }
@@ -640,16 +689,16 @@ export function App() {
       pendingAttachments={pendingAttachments}
       onActiveTabChange={setActiveTab}
       onAdminTabChange={setAdminSubTab}
-      onAnonymousChange={setAnonymous}
-      onAnonymousAvatarChange={setAnonymousAvatar}
-      onBgColorChange={setPostBgColor}
-      onTextColorChange={setPostTextColor}
-      onFontChange={setPostFont}
+      onAnonymousChange={(value) => mutateSubmissionForm(() => setAnonymous(value))}
+      onAnonymousAvatarChange={(value) => mutateSubmissionForm(() => setAnonymousAvatar(value))}
+      onBgColorChange={(value) => mutateSubmissionForm(() => setPostBgColor(value))}
+      onTextColorChange={(value) => mutateSubmissionForm(() => setPostTextColor(value))}
+      onFontChange={(value) => mutateSubmissionForm(() => setPostFont(value))}
       onFilesSelected={handleUploadFiles}
       onLogout={logout}
       onOpenOps={showOpsUi && canOpenOps(me) ? () => navigate({ kind: "ops" }) : undefined}
       onSelectTenant={selectTenant}
-      onPostTextChange={setPostText}
+      onPostTextChange={(value) => mutateSubmissionForm(() => setPostText(value))}
       onPostsTabChange={setPostsSubTab}
       onRefreshMe={refreshMe}
       adminUserDetailTarget={adminUserDetailTarget}
@@ -658,10 +707,14 @@ export function App() {
       onOpenPostDetailFromAdmin={openPostDetailFromAdmin}
       onPostsPageChange={setPostsPage}
       onRefreshTenantData={() => refreshTenantData(postsPage)}
-      onRemoveAttachment={removeAttachment}
+      onRemoveAttachment={handleRemoveAttachment}
       onSubmitPost={submitPost}
     />
   );
+}
+
+function readOAuthAuthorizeSearchFromRoute(route: AppRoute) {
+  return route.kind === "login" ? readOAuthAuthorizeSearchFromReturnTo(route.returnTo) : null;
 }
 
 function defaultPagination(): Pagination {
@@ -680,7 +733,8 @@ function canOpenOps(me: AuthenticatedMe) {
 function routeFromPath(pathname: string): AppRoute {
   const normalized = pathname.replace(/\/+$/, "") || "/";
   if (normalized === "/login") {
-    return { kind: "login" };
+    const returnTo = readLoginReturnTo(window.location.search);
+    return returnTo ? { kind: "login", returnTo } : { kind: "login" };
   }
   if (normalized === "/tenants") {
     return { kind: "tenants" };
@@ -734,6 +788,9 @@ function pathFromRoute(route: AppRoute) {
   }
   if (route.kind === "oauth") {
     return `/oauth/authorize${route.search}`;
+  }
+  if (route.kind === "login") {
+    return route.returnTo ? buildLoginPathWithReturnTo(route.returnTo) : "/login";
   }
   return `/${route.kind}`;
 }

@@ -283,9 +283,9 @@ function isBanListPreferences(value: unknown): value is BanListPreferences {
 }
 
 function readMemberListPreferences(tenantId: string): MemberListPreferences {
-  if (hasAnyQueryParam(["q", "role", "sort", "page", "user"])) {
+  if (hasAnyQueryParam(["member_q", "role", "sort", "member_page", "user"])) {
     return {
-      keyword: readQueryParam("q"),
+      keyword: readQueryParam("member_q"),
       roleFilter: readMemberRoleQuery(),
       sort: readMemberSortQuery(),
     };
@@ -294,9 +294,9 @@ function readMemberListPreferences(tenantId: string): MemberListPreferences {
 }
 
 function readBanListPreferences(tenantId: string): BanListPreferences {
-  if (hasAnyQueryParam(["q", "active", "page"])) {
+  if (hasAnyQueryParam(["ban_q", "active", "ban_page"])) {
     return {
-      keyword: readQueryParam("q"),
+      keyword: readQueryParam("ban_q"),
       onlyActive: readQueryParam("active", "1") !== "0",
     };
   }
@@ -352,12 +352,12 @@ export function AdminPage({
   const [memberKeyword, setMemberKeyword] = useState(() => readMemberListPreferences(selectedTenant.id).keyword);
   const [memberRoleFilter, setMemberRoleFilter] = useState<"all" | TenantRole>(() => readMemberListPreferences(selectedTenant.id).roleFilter);
   const [memberSort, setMemberSort] = useState<MemberSort>(() => readMemberListPreferences(selectedTenant.id).sort);
-  const [memberPage, setMemberPage] = useState(() => readQueryInt("page", 1, { min: 1 }));
+  const [memberPage, setMemberPage] = useState(() => readQueryInt("member_page", 1, { min: 1 }));
   const [memberPagination, setMemberPagination] = useState<Pagination>(() => defaultPagination());
   const [tenantMemberTotal, setTenantMemberTotal] = useState(0);
   const [membersLoading, setMembersLoading] = useState(false);
   const [banKeyword, setBanKeyword] = useState(() => readBanListPreferences(selectedTenant.id).keyword);
-  const [banPage, setBanPage] = useState(() => readQueryInt("page", 1, { min: 1 }));
+  const [banPage, setBanPage] = useState(() => readQueryInt("ban_page", 1, { min: 1 }));
   const [banPagination, setBanPagination] = useState<Pagination>(() => defaultPagination());
   const [bansLoading, setBansLoading] = useState(false);
   const [onlyActiveBans, setOnlyActiveBans] = useState(() => readBanListPreferences(selectedTenant.id).onlyActive);
@@ -397,14 +397,14 @@ export function AdminPage({
       setMemberKeyword(preferences.keyword);
       setMemberRoleFilter(preferences.roleFilter);
       setMemberSort(preferences.sort);
-      setMemberPage(readQueryInt("page", 1, { min: 1 }));
+      setMemberPage(readQueryInt("member_page", 1, { min: 1 }));
       return;
     }
     if (activeTab === "bans") {
       const preferences = readBanListPreferences(selectedTenant.id);
       setBanKeyword(preferences.keyword);
       setOnlyActiveBans(preferences.onlyActive);
-      setBanPage(readQueryInt("page", 1, { min: 1 }));
+      setBanPage(readQueryInt("ban_page", 1, { min: 1 }));
     }
   }, [activeTab, selectedTenant.id]);
 
@@ -1119,23 +1119,23 @@ export function AdminPage({
                   setMemberKeyword(value);
                   setMemberPage(1);
                   writeMemberListPreferences(selectedTenant.id, { keyword: value, roleFilter: memberRoleFilter, sort: memberSort });
-                  writeQueryParams({ q: value.trim() || null, page: null });
+                  writeQueryParams({ member_q: value.trim() || null, member_page: null, q: null, page: null });
                 }}
                 onRoleFilterChange={(value) => {
                   setMemberRoleFilter(value);
                   setMemberPage(1);
                   writeMemberListPreferences(selectedTenant.id, { keyword: memberKeyword, roleFilter: value, sort: memberSort });
-                  writeQueryParams({ role: value === "all" ? null : value, page: null });
+                  writeQueryParams({ role: value === "all" ? null : value, member_page: null, page: null });
                 }}
                 onSortChange={(value) => {
                   setMemberSort(value);
                   setMemberPage(1);
                   writeMemberListPreferences(selectedTenant.id, { keyword: memberKeyword, roleFilter: memberRoleFilter, sort: value });
-                  writeQueryParams({ sort: value === "joined_asc" ? null : value, page: null });
+                  writeQueryParams({ sort: value === "joined_asc" ? null : value, member_page: null, page: null });
                 }}
                 onPageChange={(page) => {
                   setMemberPage(page);
-                  writeQueryParams({ page: page > 1 ? page : null });
+                  writeQueryParams({ member_page: page > 1 ? page : null, page: null });
                 }}
                 onFormChange={setMemberForm}
                 onAddMember={() => void addMember()}
@@ -1162,17 +1162,17 @@ export function AdminPage({
                   setBanKeyword(value);
                   setBanPage(1);
                   writeBanListPreferences(selectedTenant.id, { keyword: value, onlyActive: onlyActiveBans });
-                  writeQueryParams({ q: value.trim() || null, page: null });
+                  writeQueryParams({ ban_q: value.trim() || null, ban_page: null, q: null, page: null });
                 }}
                 onOnlyActiveChange={(value) => {
                   setOnlyActiveBans(value);
                   setBanPage(1);
                   writeBanListPreferences(selectedTenant.id, { keyword: banKeyword, onlyActive: value });
-                  writeQueryParams({ active: value ? null : "0", page: null });
+                  writeQueryParams({ active: value ? null : "0", ban_page: null, page: null });
                 }}
                 onPageChange={(page) => {
                   setBanPage(page);
-                  writeQueryParams({ page: page > 1 ? page : null });
+                  writeQueryParams({ ban_page: page > 1 ? page : null, page: null });
                 }}
                 onRefresh={() => void refreshBans()}
                 onSubmit={() => void banUser()}
@@ -3621,9 +3621,9 @@ function PublishPanel({
                     <>
                       <InfoPill label="发布方式" value="QQ 频道论坛" />
                       <InfoPill label="登录态" value="无需登录" />
-                      <InfoPill label="风控间隔" value="无需排队" />
+                      <InfoPill label="风控间隔" value={`${target.publishDelaySeconds}s`} />
                       <InfoPill label="认证方式" value="AppID / AppSecret" />
-                      <p className="rounded-md border border-sky-100 bg-sky-50 px-2 py-1.5 text-sky-700 md:col-span-4">官方机器人发布走 QQ OpenAPI，不使用 QZone cookies，也不需要扫码或协议登录。</p>
+                      <p className="rounded-md border border-sky-100 bg-sky-50 px-2 py-1.5 text-sky-700 md:col-span-4">官方机器人发布走 QQ OpenAPI，不使用 QZone cookies，也不需要扫码或协议登录；发帖任务仍会按风控间隔排队。</p>
                     </>
                   ) : (
                     <>
@@ -3804,12 +3804,12 @@ function PublishTargetConfigEditor({
   }, [target.displayName, target.enabled, target.required, target.publishDelaySeconds, target.qzoneRefreshMode]);
 
   const isOfficialQqTarget = target.botAccount.platform === "official_qq" || target.type === "qq_channel_forum";
-  const normalizedDelay = isOfficialQqTarget ? 0 : Math.max(Number(publishDelaySeconds || DEFAULT_PUBLISH_INTERVAL_SECONDS), 0);
+  const normalizedDelay = Math.max(Number(publishDelaySeconds || DEFAULT_PUBLISH_INTERVAL_SECONDS), 0);
   const normalizedName = displayName.trim();
   const changed = normalizedName !== target.displayName
     || enabled !== target.enabled
     || required !== target.required
-    || (!isOfficialQqTarget && normalizedDelay !== target.publishDelaySeconds)
+    || normalizedDelay !== target.publishDelaySeconds
     || (!isOfficialQqTarget && qzoneRefreshMode !== target.qzoneRefreshMode);
 
   function saveConfig() {
@@ -3817,7 +3817,8 @@ function PublishTargetConfigEditor({
       displayName: normalizedName,
       enabled,
       required,
-      ...(isOfficialQqTarget ? {} : { publishDelaySeconds: normalizedDelay, qzoneRefreshMode }),
+      publishDelaySeconds: normalizedDelay,
+      ...(isOfficialQqTarget ? {} : { qzoneRefreshMode }),
     });
   }
 
@@ -3826,7 +3827,7 @@ function PublishTargetConfigEditor({
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
         <div>
           <p className="text-sm font-semibold text-slate-800">目标设置</p>
-          <p className="mt-0.5 text-xs font-semibold text-slate-500">{isOfficialQqTarget ? "名称、启用状态和必发策略。官方机器人发布无需登录态。" : "名称、启用状态、风控间隔、登录方式。"}</p>
+          <p className="mt-0.5 text-xs font-semibold text-slate-500">{isOfficialQqTarget ? "名称、启用状态、风控间隔和必发策略。官方机器人发布无需登录态。" : "名称、启用状态、风控间隔、登录方式。"}</p>
         </div>
         <Badge variant={changed ? "secondary" : "outline"}>{changed ? "有改动" : "设置"}</Badge>
       </summary>
@@ -3843,25 +3844,23 @@ function PublishTargetConfigEditor({
             保存目标设置
           </Button>
         </div>
-        <div className={`mt-3 grid gap-2 ${isOfficialQqTarget ? "md:grid-cols-[minmax(180px,1fr)]" : "md:grid-cols-[minmax(180px,1fr)_150px_180px]"}`}>
+        <div className={`mt-3 grid gap-2 ${isOfficialQqTarget ? "md:grid-cols-[minmax(180px,1fr)_150px]" : "md:grid-cols-[minmax(180px,1fr)_150px_180px]"}`}>
           <Input className="bg-white" placeholder="发布目标名称" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+          <Input
+            className="bg-white"
+            inputMode="numeric"
+            placeholder="风控间隔秒"
+            value={publishDelaySeconds}
+            onChange={(event) => setPublishDelaySeconds(event.target.value.replace(/\D/g, ""))}
+          />
           {isOfficialQqTarget ? null : (
-            <>
-              <Input
-                className="bg-white"
-                inputMode="numeric"
-                placeholder="风控间隔秒"
-                value={publishDelaySeconds}
-                onChange={(event) => setPublishDelaySeconds(event.target.value.replace(/\D/g, ""))}
-              />
-              <Select value={qzoneRefreshMode} onValueChange={(value) => setQzoneRefreshMode(value as "protocol" | "qr")}>
-                <SelectTrigger className="h-10 w-full bg-white font-bold"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="protocol">协议自动获取登录态</SelectItem>
-                  <SelectItem value="qr">扫码登录刷新登录态</SelectItem>
-                </SelectContent>
-              </Select>
-            </>
+            <Select value={qzoneRefreshMode} onValueChange={(value) => setQzoneRefreshMode(value as "protocol" | "qr")}>
+              <SelectTrigger className="h-10 w-full bg-white font-bold"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="protocol">协议自动获取登录态</SelectItem>
+                <SelectItem value="qr">扫码登录刷新登录态</SelectItem>
+              </SelectContent>
+            </Select>
           )}
         </div>
         <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold text-slate-600">
