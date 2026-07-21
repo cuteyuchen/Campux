@@ -36,6 +36,9 @@ jobs:
       - name: Generate Prisma client
         run: bun run db:generate
 
+      - name: Generate SQLite Prisma client for server tests
+        run: bun run db:sqlite:generate
+
       - name: Test server
         run: bun test apps/server/src
 
