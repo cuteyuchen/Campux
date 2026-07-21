@@ -1241,40 +1241,38 @@ export function PostsPage({
         }}
       />
       <Dialog open={imagePreview.open} onOpenChange={(open) => setImagePreview((current) => ({ ...current, open }))}>
-        <DialogContent className="w-[min(920px,calc(100vw-32px))]">
-          <DialogHeader>
-            <DialogTitle>{imagePreview.title}</DialogTitle>
+        <DialogContent className="flex w-[min(920px,calc(100vw-24px))] max-h-[min(92dvh,calc(100dvh-24px))] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(920px,calc(100vw-24px))]">
+          <DialogHeader className="shrink-0 space-y-1 border-b border-slate-100 px-4 py-3 pr-12 text-left sm:px-5">
+            <DialogTitle className="truncate text-base">{imagePreview.title}</DialogTitle>
             <DialogDescription>
               {imagePreview.images.length > 0 ? `${imagePreview.index + 1} / ${imagePreview.images.length}` : "暂无图片"}
             </DialogDescription>
           </DialogHeader>
-          <div className="px-5 pb-5">
-            {activePreviewImage ? (
-              <div className="grid gap-3">
-                <div className="grid max-h-[70dvh] place-items-center overflow-auto rounded-md border border-slate-200 bg-slate-50">
-                  <img
-                    src={getPostImageUrl(activePreviewImage)}
-                    alt={activePreviewImage.fileName ?? imagePreview.title}
-                    referrerPolicy="no-referrer"
-                    className="max-h-[70dvh] w-auto max-w-full object-contain"
-                  />
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="min-w-0 truncate text-xs font-bold text-slate-500">{activePreviewImage.fileName ?? "上传图片"}</p>
-                  {imagePreview.images.length > 1 ? (
-                    <div className="flex gap-2">
-                      <Button variant="outline" size="sm" onClick={() => shiftImagePreview(-1)}>
-                        上一张
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => shiftImagePreview(1)}>
-                        下一张
-                      </Button>
-                    </div>
-                  ) : null}
-                </div>
+          {activePreviewImage ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="grid min-h-0 flex-1 place-items-center overflow-hidden bg-slate-50 px-3 py-3 sm:px-4">
+                <img
+                  src={getPostImageUrl(activePreviewImage)}
+                  alt={activePreviewImage.fileName ?? imagePreview.title}
+                  referrerPolicy="no-referrer"
+                  className="max-h-[min(72dvh,calc(100dvh-180px))] w-auto max-w-full object-contain"
+                />
               </div>
-            ) : null}
-          </div>
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-3 sm:px-5">
+                <p className="min-w-0 truncate text-xs font-bold text-slate-500">{activePreviewImage.fileName ?? "上传图片"}</p>
+                {imagePreview.images.length > 1 ? (
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => shiftImagePreview(-1)}>
+                      上一张
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => shiftImagePreview(1)}>
+                      下一张
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
       <Dialog open={rejectDialog.open} onOpenChange={(open) => setRejectDialog((current) => ({ ...current, open }))}>
