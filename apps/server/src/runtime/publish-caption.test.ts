@@ -42,7 +42,7 @@ describe("批量整条说说：固定前后缀各只出现一次", () => {
     );
     const body = joinBatchCaptions(parts);
     const full = wrapBatchCaptionWithFixedText(template, body);
-    expect(full).toBe("【沙塘大遭墙】\n#6449\n———\n#6450\n投稿请私聊本号");
+    expect(full).toBe("【沙塘大遭墙】\n#6449\n#6450\n投稿请私聊本号");
     // 关键断言：前缀/后缀全文各只出现一次
     expect(full.match(/【沙塘大遭墙】/g)?.length).toBe(1);
     expect(full.match(/投稿请私聊本号/g)?.length).toBe(1);
@@ -52,7 +52,7 @@ describe("批量整条说说：固定前后缀各只出现一次", () => {
     const bare = { ...template, customText: "", suffixText: "" };
     const parts = [1, 2].map((postId) => renderPublishCaption(bare, { ...basePost, postId, omitFixedText: true }));
     const full = wrapBatchCaptionWithFixedText(bare, joinBatchCaptions(parts));
-    expect(full).toBe("#1\n———\n#2");
+    expect(full).toBe("#1\n#2");
   });
 });
 
@@ -79,7 +79,7 @@ describe("LLM 极短总结：位于 @原作者 之后、固定后缀之前", () 
     ];
     const full = wrapBatchCaptionWithFixedText(withMention, joinBatchCaptions(parts));
     expect(full).toBe(
-      "【沙塘大遭墙】\n#1 @{uin:10001,nick:,who:1} 甲总结\n———\n#2 @{uin:10001,nick:,who:1} 乙总结\n投稿请私聊本号",
+      "【沙塘大遭墙】\n#1 @{uin:10001,nick:,who:1} 甲总结\n#2 @{uin:10001,nick:,who:1} 乙总结\n投稿请私聊本号",
     );
     expect(full.match(/投稿请私聊本号/g)?.length).toBe(1);
     expect(full).toContain("甲总结");
@@ -150,7 +150,7 @@ describe("稿件正文含 @QQ 提及时配文中加入 QZone @mention", () => {
     ];
     const full = wrapBatchCaptionWithFixedText(withMention, joinBatchCaptions(parts));
     expect(full).toBe(
-      "【沙塘大遭墙】\n#1 @{uin:111111,nick:,who:1}\n———\n#2 @{uin:222222,nick:,who:1}\n投稿请私聊本号",
+      "【沙塘大遭墙】\n#1 @{uin:111111,nick:,who:1}\n#2 @{uin:222222,nick:,who:1}\n投稿请私聊本号",
     );
     expect(full.match(/投稿请私聊本号/g)?.length).toBe(1);
   });

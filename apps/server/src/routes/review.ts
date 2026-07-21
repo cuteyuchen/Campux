@@ -8,7 +8,7 @@ import { prisma } from "../lib/prisma";
 import { writeAuditLog } from "../lib/audit";
 import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedError } from "../lib/post-recall";
 import { enqueuePublishFanout } from "../runtime/publishing";
-import { addApprovedPostToBatch } from "../runtime/publish-batching";
+import { addApprovedPostToBatch, flushCollectingBatches } from "../runtime/publish-batching";
 import { readTenantPublishMode } from "../lib/tenant-metadata";
 import { parsePostDisplayIdFilter } from "../lib/post-display-id-filter";
 import type { RuntimeQueue } from "../runtime/queue";
@@ -142,6 +142,29 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
       })),
       pagination: toPagination(query.page, query.limit, total),
     };
+  });
+
+
+  app.post("/api/review/publish-batches/flush-now", async (request, reply) => {
+    const context = await requireReadyTenant(request, reply, "reviewer");
+    const result = await flushCollectingBatches(
+      queue,
+      context.selectedTenant.id,
+      context.user.id,
+      request.log,
+    );
+    if (result.flushed === 0) {
+      return reply.code(409).send({ message: "当前没有等待合并发布的批次" });
+    }
+    await writeAuditLog({
+      tenantId: context.selectedTenant.id,
+      actorId: context.user.id,
+      action: "publish_batch.flush_now",
+      targetType: "tenant",
+      targetId: context.selectedTenant.id,
+      detail: { flushed: result.flushed },
+    });
+    return { ok: true, flushed: result.flushed };
   });
 
   app.post("/api/review/posts/:id/approve", async (request, reply) => {

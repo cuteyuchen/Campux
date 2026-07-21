@@ -59,3 +59,5 @@ apps/server/src/standalone/embedded-assets.generated.ts
 
 # 单文件运行时数据目录（SQLite 库、本地存储、解包资源）
 /data/
+
+.codex-run

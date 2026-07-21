@@ -1,17 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { decideFlush, joinBatchCaptions, postImageCount } from "./publish-batching";
+import {
+  BATCH_CAPTION_SEPARATOR_LLM,
+  BATCH_CAPTION_SEPARATOR_PLAIN,
+  decideFlush,
+  joinBatchCaptions,
+  postImageCount,
+} from "./publish-batching";
 
 describe("joinBatchCaptions", () => {
-  test("joins multiple captions with separator", () => {
-    expect(joinBatchCaptions(["#12 hi", "#15 yo"])).toBe("#12 hi\n———\n#15 yo");
+  test("LLM mode: joins with newline", () => {
+    expect(joinBatchCaptions(["#12 hi", "#15 yo"], BATCH_CAPTION_SEPARATOR_LLM)).toBe("#12 hi\n#15 yo");
+    expect(joinBatchCaptions(["#12 hi", "#15 yo"])).toBe("#12 hi\n#15 yo");
+  });
+
+  test("plain mode: joins with 4 spaces on one line", () => {
+    expect(joinBatchCaptions(["#12", "#15", "#18"], BATCH_CAPTION_SEPARATOR_PLAIN)).toBe("#12    #15    #18");
   });
 
   test("drops empty/whitespace captions", () => {
-    expect(joinBatchCaptions(["#12", "", "  ", "#15"])).toBe("#12\n———\n#15");
+    expect(joinBatchCaptions(["#12", "", "  ", "#15"], BATCH_CAPTION_SEPARATOR_LLM)).toBe("#12\n#15");
   });
 
   test("single caption has no separator", () => {
-    expect(joinBatchCaptions(["#12 only"])).toBe("#12 only");
+    expect(joinBatchCaptions(["#12 only"], BATCH_CAPTION_SEPARATOR_PLAIN)).toBe("#12 only");
   });
 
   test("all-empty yields empty string", () => {

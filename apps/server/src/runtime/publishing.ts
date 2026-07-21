@@ -10,7 +10,7 @@ import { prisma } from "../lib/prisma";
 import { decryptJson } from "../lib/secret-json";
 import { checkAndUpdateQZoneSession } from "../lib/qzone-cookies";
 import { isQZoneProtocolAutoRefreshCooldownError } from "../lib/qzone-auto-refresh";
-import { joinBatchCaptions } from "./publish-batching";
+import { BATCH_CAPTION_SEPARATOR_LLM, BATCH_CAPTION_SEPARATOR_PLAIN, joinBatchCaptions } from "./publish-batching";
 import { generatePublishSummary } from "./publish-summary";
 import { readTenantPublishLlmSummaryEnabled } from "../lib/tenant-metadata";
 import { imageStorageHardMaxBytes } from "../lib/image-upload-policy";
@@ -1006,8 +1006,9 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
     }
     // 单稿：renderPublishCaption 已含固定前后缀，直接拼接。
     // 批量：每条只保留可变部分（#号/@作者/链接），固定前缀与后缀在整条说说级别各加一次。
+    const batchSeparator = summaryEnabled ? BATCH_CAPTION_SEPARATOR_LLM : BATCH_CAPTION_SEPARATOR_PLAIN;
     const captionText = isBatch
-      ? wrapBatchCaptionWithFixedText(attempt.publishTarget.botAccount.publishTextTemplate, joinBatchCaptions(captionParts))
+      ? wrapBatchCaptionWithFixedText(attempt.publishTarget.botAccount.publishTextTemplate, joinBatchCaptions(captionParts, batchSeparator))
       : joinBatchCaptions(captionParts);
     const result = await publishToQZone({
       tenantId: attempt.tenantId,

@@ -309,6 +309,7 @@ export function PostsPage({
   const [autoFollowBusy, setAutoFollowBusy] = useState(false);
   const [approveAllOpen, setApproveAllOpen] = useState(false);
   const [approveAllBusy, setApproveAllBusy] = useState(false);
+  const [flushBatchBusy, setFlushBatchBusy] = useState(false);
   const [rejectDialog, setRejectDialog] = useState<RejectDialogState>(() => ({
     open: false,
     postId: "",
@@ -526,6 +527,23 @@ export function PostsPage({
       setApproveAllBusy(false);
     }
   }
+
+  async function flushCollectingBatchesNow() {
+    setFlushBatchBusy(true);
+    try {
+      const data = await api<{ ok: boolean; flushed: number }>("/api/review/publish-batches/flush-now", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      toast.success(data.flushed > 0 ? `已触发 ${data.flushed} 个批次立即发布。` : "当前没有等待发布的批次。");
+      await refreshAll();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "立即发布失败");
+    } finally {
+      setFlushBatchBusy(false);
+    }
+  }
+
 
   async function cancelPost(id: string) {
     setBusyCancelPostId(id);
@@ -1069,6 +1087,20 @@ export function PostsPage({
                 >
                   <CheckIcon className="mr-1 size-4" />
                   一键通过全部
+                </Button>
+              </div>
+            ) : null}
+            {reviewStatus === "publishing" ? (
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2">
+                <p className="min-w-0 text-xs font-medium text-cyan-900">
+                  批量队列中等待合并的稿件可立即冲刷发布，不必等满图数或超时。
+                </p>
+                <Button
+                  className="h-9 shrink-0 bg-cyan-600 font-bold text-white hover:bg-cyan-700"
+                  disabled={reviewLoading || flushBatchBusy}
+                  onClick={() => void flushCollectingBatchesNow()}
+                >
+                  立即发布
                 </Button>
               </div>
             ) : null}
