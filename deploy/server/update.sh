@@ -8,9 +8,11 @@ COMPOSE_FILE="${COMPOSE_FILE:-$REPOSITORY_DIR/deploy/server/compose.yaml}"
 BACKUP_ROOT="${BACKUP_ROOT:-$DEPLOY_ROOT/backups/container-deploy}"
 LOCK_FILE="${LOCK_FILE:-$DEPLOY_ROOT/.container-deploy.lock}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-ghcr.io/cuteyuchen/campux}"
+OCR_IMAGE_REPOSITORY="${OCR_IMAGE_REPOSITORY:-ghcr.io/cuteyuchen/campux-ocr}"
 PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL:-https://xxyg.cuteyuchen.top/api/health}"
 PG_CONTAINER="${PG_CONTAINER:-campux-postgres}"
 APP_CONTAINER="${APP_CONTAINER:-campux}"
+OCR_CONTAINER="${OCR_CONTAINER:-campux-ocr}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-campux-deploy_default}"
 BARE_PID_FILE="${BARE_PID_FILE:-$DEPLOY_ROOT/runtime/campux-server.pid}"
 BARE_BUN_BIN="${BARE_BUN_BIN:-$DEPLOY_ROOT/runtime.old/node_modules/.bin/bun}"
@@ -20,6 +22,7 @@ PULL_DELAY_SECONDS="${PULL_DELAY_SECONDS:-10}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 backup_dir="$BACKUP_ROOT/deploy-$timestamp"
 old_image=""
+old_ocr_image=""
 bare_pid=""
 first_container_deploy=0
 
@@ -54,6 +57,7 @@ load_env() {
 compose() {
   CAMPUX_ENV_FILE="$ENV_FILE" \
   CAMPUX_IMAGE="$CAMPUX_IMAGE" \
+  CAMPUX_OCR_IMAGE="$CAMPUX_OCR_IMAGE" \
   CAMPUX_CONTAINER_DATABASE_URL="$CAMPUX_CONTAINER_DATABASE_URL" \
   CAMPUX_DOCKER_NETWORK="$DOCKER_NETWORK" \
     docker compose --project-name campux-app --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
@@ -121,6 +125,17 @@ wait_for_health() {
   return 1
 }
 
+wait_for_ocr_health() {
+  for _ in $(seq 1 60); do
+    if [[ "$(docker container inspect "$OCR_CONTAINER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' 2>/dev/null || true)" = "healthy" ]]; then
+      log "OCR health check passed"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 pull_image() {
   local image="$1"
   for attempt in $(seq 1 "$PULL_ATTEMPTS"); do
@@ -155,12 +170,24 @@ prune_backups() {
   done
 }
 
+restore_ocr() {
+  if [[ -n "$old_ocr_image" ]]; then
+    log "restoring OCR image $old_ocr_image"
+    CAMPUX_OCR_IMAGE="$old_ocr_image"
+    compose up -d --no-build --force-recreate campux-ocr
+    wait_for_ocr_health || die "OCR rollback completed but health check still fails"
+  else
+    log "removing failed initial OCR container"
+    compose rm -sf campux-ocr || true
+  fi
+}
+
 rollback() {
   log "deployment failed; starting application rollback"
-  compose down --remove-orphans || true
+  restore_ocr
   if [[ -n "$old_image" ]]; then
     CAMPUX_IMAGE="$old_image"
-    compose up -d --no-build --force-recreate
+    compose up -d --no-build --force-recreate campux
   elif [[ "$first_container_deploy" = "1" ]]; then
     start_bare_app
   fi
@@ -191,23 +218,40 @@ main() {
   git -C "$REPOSITORY_DIR" pull --ff-only origin main
   target_sha="$(git -C "$REPOSITORY_DIR" rev-parse HEAD)"
   CAMPUX_IMAGE="$IMAGE_REPOSITORY:sha-$target_sha"
+  CAMPUX_OCR_IMAGE="$OCR_IMAGE_REPOSITORY:sha-$target_sha"
 
   if docker container inspect "$APP_CONTAINER" >/dev/null 2>&1; then
     old_image="$(docker container inspect "$APP_CONTAINER" --format '{{.Config.Image}}')"
   else
     first_container_deploy=1
   fi
+  if docker container inspect "$OCR_CONTAINER" >/dev/null 2>&1; then
+    old_ocr_image="$(docker container inspect "$OCR_CONTAINER" --format '{{.Config.Image}}')"
+  fi
 
   log "target commit: $target_sha"
   log "target image: $CAMPUX_IMAGE"
+  log "target OCR image: $CAMPUX_OCR_IMAGE"
   pull_image "$CAMPUX_IMAGE" || die "unable to pull $CAMPUX_IMAGE; current application was not changed"
+  pull_image "$CAMPUX_OCR_IMAGE" || die "unable to pull $CAMPUX_OCR_IMAGE; current application was not changed"
   backup_database
+
+  if ! compose up -d --no-build --force-recreate campux-ocr; then
+    compose logs --no-color --tail 200 campux-ocr > "$backup_dir/failed-ocr-container.log" 2>&1 || true
+    restore_ocr
+    die "OCR deployment failed; current application was not changed"
+  fi
+  if ! wait_for_ocr_health; then
+    compose logs --no-color --tail 200 campux-ocr > "$backup_dir/failed-ocr-container.log" 2>&1 || true
+    restore_ocr
+    die "OCR health check failed; current application was not changed"
+  fi
 
   if [[ "$first_container_deploy" = "1" ]]; then
     stop_bare_app
   fi
 
-  if ! compose up -d --no-build --force-recreate; then
+  if ! compose up -d --no-build --force-recreate campux; then
     rollback
   fi
   if ! wait_for_health; then
@@ -215,7 +259,7 @@ main() {
     rollback
   fi
 
-  printf '%s %s\n' "$target_sha" "$CAMPUX_IMAGE" > "$DEPLOY_ROOT/.deployed-container"
+  printf '%s %s %s\n' "$target_sha" "$CAMPUX_IMAGE" "$CAMPUX_OCR_IMAGE" > "$DEPLOY_ROOT/.deployed-container"
   prune_backups
   log "deployment completed successfully"
   log "backup kept at $backup_dir"

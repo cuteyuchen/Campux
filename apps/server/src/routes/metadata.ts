@@ -17,6 +17,9 @@ import {
   imageCompressionQualityKey,
   imageCompressionMaxDimensionKey,
   imageMaxSizeMetadataKey,
+  ocrBlockedWordsEnabledKey,
+  normalizeOcrBlockedWordsEnabled,
+  readTenantOcrBlockedWordsEnabled,
   botStylishMessagesEnabledKey,
   normalizeBotStylishMessagesEnabled,
   botPrivatePostStylishEnabledKey,
@@ -84,6 +87,7 @@ const patchMetadataSchema = z.object({
   logoUrl: z.string().trim().max(1000).refine((value) => value === "" || /^https?:\/\//i.test(value) || value.startsWith("/"), "Logo URL 必须是 http(s) 或站内路径").optional(),
   postRules: z.array(z.string().min(1)).optional(),
   blockedWords: z.array(z.string().trim().max(maxBlockedWordLength)).max(maxBlockedWords).optional(),
+  ocrBlockedWordsEnabled: z.boolean().optional(),
   pendingPostLimit: z.number().int().min(0).max(maxPendingPostLimit).optional(),
   services: z.array(
     z.object({
@@ -230,6 +234,7 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
     const context = await requireTenantRole(request, reply, "admin");
     return {
       blockedWords: await readTenantBlockedWords(prisma, context.selectedTenant.id),
+      ocrBlockedWordsEnabled: await readTenantOcrBlockedWordsEnabled(prisma, context.selectedTenant.id),
     };
   });
 
@@ -360,6 +365,9 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
     if (body.blockedWords !== undefined) {
       updates.push({ key: blockedWordsMetadataKey, value: normalizeBlockedWords(body.blockedWords) });
     }
+    if (body.ocrBlockedWordsEnabled !== undefined) {
+      updates.push({ key: ocrBlockedWordsEnabledKey, value: normalizeOcrBlockedWordsEnabled(body.ocrBlockedWordsEnabled) });
+    }
     if (body.pendingPostLimit !== undefined) {
       updates.push({ key: pendingPostLimitMetadataKey, value: body.pendingPostLimit });
     }
@@ -444,6 +452,7 @@ export function registerMetadataRoutes(app: FastifyInstance, config: CampuxConfi
       targetId: context.selectedTenant.id,
       detail: {
         fields: Object.keys(body),
+        ...(body.ocrBlockedWordsEnabled !== undefined ? { ocrBlockedWordsEnabled: body.ocrBlockedWordsEnabled } : {}),
       },
     });
 

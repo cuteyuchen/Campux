@@ -3,6 +3,7 @@ import {
   findBlockedWords,
   findTenantBlockedWordsInText,
   formatBlockedWordsError,
+  formatImageBlockedWordsError,
   normalizeBlockedWords,
 } from "./blocked-words";
 
@@ -47,5 +48,6 @@ describe("blocked words", () => {
     const matches = await findTenantBlockedWordsInText(metadataClient(["词A", "词B"]), "tenant-1", "正文有词A，也有词B");
     expect(matches).toEqual(["词A", "词B"]);
     expect(formatBlockedWordsError(matches)).toBe("当前投稿含有违禁词，不可提交：词A、词B");
+    expect(formatImageBlockedWordsError(matches)).toBe("当前投稿图片含有违禁词，不可提交：词A、词B");
   });
 });

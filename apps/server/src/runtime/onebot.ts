@@ -26,8 +26,9 @@ import { prisma } from "../lib/prisma";
 import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedError } from "../lib/post-recall";
 import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
-import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled } from "../lib/tenant-metadata";
-import { findTenantBlockedWordsInText, formatBlockedWordsError } from "../lib/blocked-words";
+import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantOcrBlockedWordsEnabled } from "../lib/tenant-metadata";
+import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
+import { findBlockedWordsInPostImages, OcrUnavailableError } from "../lib/ocr";
 import {
   buildImageSourceSizeErrorMessage,
   imageStorageHardMaxBytes,
@@ -2496,9 +2497,34 @@ export class OneBotRuntime {
       throw new BotWorkflowError("正文太长了，请控制在 1000 字以内，再发送“结束”。", 400);
     }
 
-    const blockedWords = await findTenantBlockedWordsInText(prisma, bot.tenantId, text);
+    const [tenantBlockedWords, ocrBlockedWordsEnabled] = await Promise.all([
+      readTenantBlockedWords(prisma, bot.tenantId),
+      readTenantOcrBlockedWordsEnabled(prisma, bot.tenantId),
+    ]);
+    const blockedWords = findBlockedWords(text, tenantBlockedWords);
     if (blockedWords.length > 0) {
       throw new BotWorkflowError(formatBlockedWordsError(blockedWords), 400);
+    }
+
+    if (this.config) {
+      try {
+        const imageBlockedWords = await findBlockedWordsInPostImages({
+          config: this.config,
+          tenantId: bot.tenantId,
+          attachments: draft.attachments,
+          blockedWords: tenantBlockedWords,
+          ocrEnabled: ocrBlockedWordsEnabled,
+          logger: this.logger,
+        });
+        if (imageBlockedWords.length > 0) {
+          throw new BotWorkflowError(formatImageBlockedWordsError(imageBlockedWords), 400);
+        }
+      } catch (error) {
+        if (error instanceof OcrUnavailableError) {
+          throw new BotWorkflowError(error.message, error.status);
+        }
+        throw error;
+      }
     }
 
     // 注入检测：XSS、CSS、代码、CQ 码

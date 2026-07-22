@@ -14,8 +14,9 @@ import { buildPublishedFeed, filterPublishedFeedByTag, type BatchFeedInput, type
 import { serializeAssignedPostTags } from "../lib/post-tags";
 import { parsePostDisplayIdFilter } from "../lib/post-display-id-filter";
 import { prisma } from "../lib/prisma";
-import { readTenantPendingPostLimit, readTenantImageCompression } from "../lib/tenant-metadata";
-import { findTenantBlockedWordsInText, formatBlockedWordsError } from "../lib/blocked-words";
+import { readTenantPendingPostLimit, readTenantImageCompression, readTenantOcrBlockedWordsEnabled } from "../lib/tenant-metadata";
+import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
+import { findBlockedWordsInPostImages } from "../lib/ocr";
 import {
   buildImageSourceSizeErrorMessage,
   buildVideoGifFfmpegArgs,
@@ -800,7 +801,11 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         };
       }
 
-      const blockedWords = await findTenantBlockedWordsInText(prisma, context.selectedTenant.id, text);
+      const [tenantBlockedWords, ocrBlockedWordsEnabled] = await Promise.all([
+        readTenantBlockedWords(prisma, context.selectedTenant.id),
+        readTenantOcrBlockedWordsEnabled(prisma, context.selectedTenant.id),
+      ]);
+      const blockedWords = findBlockedWords(text, tenantBlockedWords);
       if (blockedWords.length > 0) {
         throw {
           status: 400,
@@ -1006,6 +1011,21 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         const remoteAttachments = staged.slice(localAttachmentCount);
         const ordered = restoreAttachmentOrder(localAttachments, remoteAttachments, attachmentOrder)!;
         staged.splice(0, staged.length, ...ordered);
+      }
+
+      const imageBlockedWords = await findBlockedWordsInPostImages({
+        config,
+        tenantId: context.selectedTenant.id,
+        attachments: staged,
+        blockedWords: tenantBlockedWords,
+        ocrEnabled: ocrBlockedWordsEnabled,
+        logger: request.log,
+      });
+      if (imageBlockedWords.length > 0) {
+        throw {
+          status: 400,
+          message: formatImageBlockedWordsError(imageBlockedWords),
+        };
       }
 
       const initialStatus: "pending_approval" = "pending_approval";

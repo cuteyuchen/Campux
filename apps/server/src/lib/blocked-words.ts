@@ -45,6 +45,10 @@ export function formatBlockedWordsError(blockedWords: string[]): string {
   return `当前投稿含有违禁词，不可提交：${blockedWords.join("、")}`;
 }
 
+export function formatImageBlockedWordsError(blockedWords: string[]): string {
+  return `当前投稿图片含有违禁词，不可提交：${blockedWords.join("、")}`;
+}
+
 export async function readTenantBlockedWords(client: MetadataClient, tenantId: string): Promise<string[]> {
   const entry = await client.tenantMetadata.findUnique({
     where: {

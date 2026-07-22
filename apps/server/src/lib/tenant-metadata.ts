@@ -12,6 +12,8 @@ export const imageCompressionEnabledKey = "image_compression_enabled";
 export const imageCompressionQualityKey = "image_compression_quality";
 export const imageCompressionMaxDimensionKey = "image_compression_max_dimension";
 export const imageMaxSizeMetadataKey = "image_max_size_mb";
+export const ocrBlockedWordsEnabledKey = "ocr_blocked_words_enabled";
+export const ocrBlockedWordsEnabledDefault = false;
 
 export const imageCompressionDefaults = {
   enabled: true,
@@ -137,6 +139,28 @@ export async function readTenantImageCompression(client: MetadataClient, tenantI
     maxDimension: normalizeImageCompressionMaxDimension(record[imageCompressionMaxDimensionKey]),
     maxSizeMb: normalizeImageMaxSizeMb(record[imageMaxSizeMetadataKey]),
   };
+}
+
+export function normalizeOcrBlockedWordsEnabled(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value === "true" || value === "1";
+  return ocrBlockedWordsEnabledDefault;
+}
+
+export async function readTenantOcrBlockedWordsEnabled(client: MetadataClient, tenantId: string): Promise<boolean> {
+  const entry = await client.tenantMetadata.findUnique({
+    where: {
+      tenantId_key: {
+        tenantId,
+        key: ocrBlockedWordsEnabledKey,
+      },
+    },
+    select: {
+      value: true,
+    },
+  });
+
+  return normalizeOcrBlockedWordsEnabled(entry?.value);
 }
 
 export type PublishMode = "single" | "accumulate";

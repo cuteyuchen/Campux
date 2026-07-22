@@ -12,6 +12,10 @@ services:
       CAMPUX_SERVER_PORT: 8989
       CAMPUX_WEB_DIST_DIR: /app/apps/web/dist
       PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium-browser
+      CAMPUX_OCR_ENABLED: ${CAMPUX_OCR_ENABLED:-false}
+      CAMPUX_OCR_URL: http://campux-ocr:9001/ocr
+      CAMPUX_OCR_TIMEOUT_MS: ${CAMPUX_OCR_TIMEOUT_MS:-10000}
+      CAMPUX_OCR_FAILURE_MODE: ${CAMPUX_OCR_FAILURE_MODE:-allow}
     ports:
       - "8989:8989"
     networks:
@@ -22,6 +26,24 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+    depends_on:
+      campux-ocr:
+        condition: service_healthy
+
+  campux-ocr:
+    image: ${CAMPUX_OCR_IMAGE:?set CAMPUX_OCR_IMAGE to an immutable GHCR tag}
+    container_name: campux-ocr
+    restart: unless-stopped
+    environment:
+      OCR_MAX_IMAGE_BYTES: ${OCR_MAX_IMAGE_BYTES:-26214400}
+    networks:
+      - campux-infra
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9001/health', timeout=3).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
 
 networks:
   campux-infra:

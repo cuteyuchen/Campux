@@ -334,6 +334,7 @@ export function AdminPage({
 }) {
   const [form, setForm] = useState<TenantSettingsForm>(() => toForm(selectedTenant, metadata));
   const [blockedWordsText, setBlockedWordsText] = useState("");
+  const [ocrBlockedWordsEnabled, setOcrBlockedWordsEnabled] = useState(false);
   const [imageMaxSizeDraft, setImageMaxSizeDraft] = useState(() => String(metadata.imageMaxSizeMb));
   const [aiSettings, setAiSettings] = useState<TenantAiSettings | null>(null);
   const [aiForm, setAiForm] = useState<AiSettingsForm | null>(null);
@@ -389,6 +390,7 @@ export function AdminPage({
 
   useEffect(() => {
     setBlockedWordsText("");
+    setOcrBlockedWordsEnabled(false);
   }, [selectedTenant.id]);
 
   useEffect(() => {
@@ -478,7 +480,7 @@ export function AdminPage({
         api<OAuthClientSettingsResponse>("/api/admin/oauth/settings"),
         api<{ clients: OAuthClientItem[] }>("/api/admin/oauth/clients"),
         api<{ settings: TenantAiSettings }>("/api/admin/ai/settings"),
-        api<{ blockedWords: string[] }>("/api/admin/tenant/blocked-words"),
+        api<{ blockedWords: string[]; ocrBlockedWordsEnabled: boolean }>("/api/admin/tenant/blocked-words"),
       ]);
       setMembers(memberData.members);
       setMemberPagination(memberData.pagination);
@@ -493,6 +495,7 @@ export function AdminPage({
       setAiSettings(aiSettingsData.settings);
       setAiForm(aiSettingsToForm(aiSettingsData.settings));
       setBlockedWordsText(blockedWordsData.blockedWords.join("\n"));
+      setOcrBlockedWordsEnabled(blockedWordsData.ocrBlockedWordsEnabled);
     } finally {
       setAdminLoading(false);
     }
@@ -564,6 +567,7 @@ export function AdminPage({
           pendingPostLimit: form.pendingPostLimit,
           postRules: form.postRulesText.split(/\r?\n/).map((rule) => rule.trim()).filter(Boolean),
           blockedWords: blockedWordsText.split(/\r?\n/).map((word) => word.trim()).filter(Boolean),
+          ocrBlockedWordsEnabled,
           services: prepareServiceEntriesForSave(form.services),
           imageCompressionEnabled: form.imageCompressionEnabled,
           imageCompressionQuality: form.imageCompressionQuality,
@@ -1185,10 +1189,12 @@ export function AdminPage({
                 <MetadataPanel
                   form={form}
                   blockedWordsText={blockedWordsText}
+                  ocrBlockedWordsEnabled={ocrBlockedWordsEnabled}
                   imageMaxSizeDraft={imageMaxSizeDraft}
                   busy={busy}
                   onFormChange={setForm}
                   onBlockedWordsTextChange={setBlockedWordsText}
+                  onOcrBlockedWordsEnabledChange={setOcrBlockedWordsEnabled}
                   onImageMaxSizeDraftChange={setImageMaxSizeDraft}
                   onImageMaxSizeDraftCommit={() => {
                     const normalized = normalizeImageMaxSizeDraft(imageMaxSizeDraft, form.imageMaxSizeMb);
@@ -1752,10 +1758,12 @@ function BansPanel({
 function MetadataPanel({
   form,
   blockedWordsText,
+  ocrBlockedWordsEnabled,
   imageMaxSizeDraft,
   busy,
   onFormChange,
   onBlockedWordsTextChange,
+  onOcrBlockedWordsEnabledChange,
   onImageMaxSizeDraftChange,
   onImageMaxSizeDraftCommit,
   onSave,
@@ -1763,10 +1771,12 @@ function MetadataPanel({
 }: {
   form: TenantSettingsForm;
   blockedWordsText: string;
+  ocrBlockedWordsEnabled: boolean;
   imageMaxSizeDraft: string;
   busy: boolean;
   onFormChange: (form: TenantSettingsForm) => void;
   onBlockedWordsTextChange: (value: string) => void;
+  onOcrBlockedWordsEnabledChange: (value: boolean) => void;
   onImageMaxSizeDraftChange: (value: string) => void;
   onImageMaxSizeDraftCommit: () => void;
   onSave: () => void;
@@ -2113,6 +2123,18 @@ function MetadataPanel({
             />
             <span className="text-xs font-normal text-slate-500">每行一个词，投稿内容命中后将无法提交。</span>
           </label>
+          <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 md:col-span-2">
+            <div>
+              <p className="text-sm font-medium text-slate-900">图片文字违禁词识别</p>
+              <p className="text-xs text-slate-500">开启后，投稿图片中的文字也会匹配上方违禁词；识别服务异常时将正常放行投稿。</p>
+            </div>
+            <Switch
+              checked={ocrBlockedWordsEnabled}
+              disabled={busy}
+              onCheckedChange={onOcrBlockedWordsEnabledChange}
+              aria-label="启用图片文字违禁词识别"
+            />
+          </div>
           <section className="overflow-hidden rounded-md border border-slate-200 bg-slate-50 md:col-span-2">
             <div className="flex flex-col gap-3 border-b border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div>

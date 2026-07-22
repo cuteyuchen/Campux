@@ -32,6 +32,11 @@ const configSchema = z.object({
   CAMPUX_SKIP_AUTO_MIGRATE: z.string().optional(),
   // Container Chromium path for QZone rendering, e.g. /usr/bin/chromium-browser.
   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: z.string().optional(),
+  // Optional local OCR service used to inspect text in post images.
+  CAMPUX_OCR_ENABLED: z.string().optional(),
+  CAMPUX_OCR_URL: z.string().url().optional(),
+  CAMPUX_OCR_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  CAMPUX_OCR_FAILURE_MODE: z.enum(["allow", "block"]).default("allow"),
   // Build/release identifier baked into the Docker image by CI (branch-sha).
   // Surfaces in anonymous telemetry so the fleet version distribution is known.
   CAMPUX_BUILD_VERSION: z.string().optional(),
@@ -153,6 +158,12 @@ export function loadConfig() {
     storage: {
       driver: storageDriver,
       localDir: env.CAMPUX_STORAGE_LOCAL_DIR,
+    },
+    ocr: {
+      enabled: flagEnabled(env.CAMPUX_OCR_ENABLED),
+      url: nonEmpty(env.CAMPUX_OCR_URL),
+      timeoutMs: env.CAMPUX_OCR_TIMEOUT_MS,
+      failureMode: env.CAMPUX_OCR_FAILURE_MODE,
     },
     resend: {
       apiKey: env.RESEND_API_KEY,
