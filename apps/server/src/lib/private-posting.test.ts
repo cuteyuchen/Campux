@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractOneBotImageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText } from "./private-posting";
+import { extractOneBotImageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText } from "./private-posting";
 
 describe("private posting command parsing", () => {
   test("parses English hash start command", () => {
@@ -55,6 +55,11 @@ describe("private posting command parsing", () => {
     expect(parsePrivatePostModeText("实名")).toEqual({ anonymous: false });
     expect(parsePrivatePostModeText("不显示名字")).toEqual({ anonymous: true });
     expect(parsePrivatePostModeText("显示昵称")).toEqual({ anonymous: false });
+    expect(parsePrivatePostPublishModeText("单发")).toEqual({ publishImmediately: true });
+    expect(parsePrivatePostPublishModeText("立即发布")).toEqual({ publishImmediately: true });
+    expect(parsePrivatePostPublishModeText("批量")).toEqual({ publishImmediately: false });
+    expect(parsePrivatePostPublishModeText("合并发布")).toEqual({ publishImmediately: false });
+    expect(parsePrivatePostPublishModeText("匿名")).toBeNull();
   });
 
   test("accepts natural start phrases", () => {

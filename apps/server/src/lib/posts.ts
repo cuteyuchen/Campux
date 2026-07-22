@@ -65,6 +65,7 @@ export function toPostListItem(post: {
   bgColor?: string | null;
   textColor?: string | null;
   font?: string | null;
+  publishImmediately?: boolean;
   status: string;
   recallIgnored?: boolean;
   recallIgnoredAt?: Date | null;
@@ -102,6 +103,7 @@ export function toPostListItem(post: {
     bgColor: post.bgColor ?? null,
     textColor: post.textColor ?? null,
     font: post.font ?? null,
+    publishImmediately: Boolean(post.publishImmediately),
     status: post.status,
     recallIgnored: Boolean(post.recallIgnored),
     recallIgnoredAt: post.recallIgnoredAt?.toISOString() ?? null,

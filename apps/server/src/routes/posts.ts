@@ -14,7 +14,7 @@ import { buildPublishedFeed, filterPublishedFeedByTag, type BatchFeedInput, type
 import { serializeAssignedPostTags } from "../lib/post-tags";
 import { parsePostDisplayIdFilter } from "../lib/post-display-id-filter";
 import { prisma } from "../lib/prisma";
-import { readTenantPendingPostLimit, readTenantImageCompression, readTenantOcrBlockedWordsEnabled } from "../lib/tenant-metadata";
+import { readTenantPendingPostLimit, readTenantImageCompression, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
 import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
 import { findBlockedWordsInPostImages } from "../lib/ocr";
 import {
@@ -557,6 +557,7 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
     const uploadedKeys: string[] = [];
     let text = "";
     let anonymous = false;
+    let publishImmediately = false;
     let anonymousAvatar: string | null = null;
     let bgColor: string | null = null;
     let textColor: string | null = null;
@@ -572,10 +573,10 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         limits: {
           fieldNameSize: 64,
           fieldSize: 32 * 1024,
-          fields: 10,
+          fields: 12,
           files: 9,
           headerPairs: 32,
-          parts: 19,
+          parts: 21,
           fileSize: Math.max(REMOTE_VIDEO_SIZE_CAP, imageUploadLimits.sourceMaxBytes),
         },
       })) {
@@ -590,6 +591,8 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
             text = String(part.value ?? "");
           } else if (part.fieldname === "anonymous") {
             anonymous = part.value === "true" || part.value === true;
+          } else if (part.fieldname === "publishImmediately") {
+            publishImmediately = part.value === "true" || part.value === true;
           } else if (part.fieldname === "anonymousAvatar") {
             anonymousAvatar = String(part.value ?? "") || null;
           } else if (part.fieldname === "bgColor") {
@@ -1030,6 +1033,10 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
 
       const initialStatus: "pending_approval" = "pending_approval";
       const logComment = "投稿创建";
+      const publishMode = await readTenantPublishMode(prisma, context.selectedTenant.id);
+      if (publishMode.mode !== "accumulate") {
+        publishImmediately = false;
+      }
 
       // Create post and consume converted-GIF claims in one transaction with retry logic.
       // A stable candidate ID lets us reconcile a lost commit acknowledgement safely.
@@ -1098,6 +1105,7 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
                   displayId,
                   text,
                   anonymous,
+                  publishImmediately,
                   anonymousAvatar,
                   bgColor,
                   textColor,
@@ -1293,6 +1301,27 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
     }
   }
 
+
+  app.get("/api/posts/pending-limit-status", async (request, reply) => {
+    const context = await requireReadyTenant(request, reply, "submitter");
+    const pendingPostLimit = await readTenantPendingPostLimit(prisma, context.selectedTenant.id);
+    const pendingCount = await prisma.post.count({
+      where: {
+        tenantId: context.selectedTenant.id,
+        authorId: context.user.id,
+        status: "pending_approval",
+      },
+    });
+    const blocked = pendingPostLimit > 0 && pendingCount >= pendingPostLimit;
+    return {
+      pendingCount,
+      pendingPostLimit,
+      blocked,
+      message: blocked
+        ? `你还有 ${pendingCount} 条稿件待审核，当前校园墙最多同时保留 ${pendingPostLimit} 条待审核稿件。请等待审核完成后再投稿。`
+        : null,
+    };
+  });
 
   app.get("/api/posts/mine", async (request, reply) => {
     const context = await requireTenantContext(request, reply);

@@ -45,10 +45,14 @@ export function PostPage({
   postFont,
   anonymous,
   anonymousAvatar,
+  publishImmediately,
+  pendingLimitBlocked,
+  pendingLimitMessage,
   pendingAttachments,
   onPostTextChange,
   onAnonymousChange,
   onAnonymousAvatarChange,
+  onPublishImmediatelyChange,
   onBgColorChange,
   onTextColorChange,
   onFontChange,
@@ -65,11 +69,15 @@ export function PostPage({
   postFont: string;
   anonymous: boolean;
   anonymousAvatar: string;
+  publishImmediately: boolean;
+  pendingLimitBlocked: boolean;
+  pendingLimitMessage: string | null;
   selectedTenant: TenantSummary;
   pendingAttachments: PendingAttachment[];
   onPostTextChange: (value: string) => void;
   onAnonymousChange: (value: boolean) => void;
   onAnonymousAvatarChange: (value: string) => void;
+  onPublishImmediatelyChange: (value: boolean) => void;
   onBgColorChange: (value: string) => void;
   onTextColorChange: (value: string) => void;
   onFontChange: (value: string) => void;
@@ -116,8 +124,13 @@ export function PostPage({
   }
 
   function handleSubmit() {
+    if (pendingLimitBlocked) {
+      return;
+    }
     onSubmit();
   }
+
+  const formDisabled = busy || pendingLimitBlocked;
 
   return (
     <div className="h-full overflow-y-auto px-4 py-4 pb-24 md:pb-6">
@@ -127,6 +140,16 @@ export function PostPage({
           <MegaphoneIcon className="mt-0.5 size-4 shrink-0" strokeWidth={2.3} />
           <p className="min-w-0 whitespace-pre-wrap break-words">{metadata.banner}</p>
         </div>
+      ) : null}
+
+      {pendingLimitBlocked ? (
+        <section className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3">
+          <p className="font-semibold text-amber-950">暂时无法投稿</p>
+          <p className="mt-1 text-sm leading-6 text-amber-900">
+            {pendingLimitMessage || "你已有待审核稿件，请等待审核完成后再投稿。"}
+          </p>
+          <p className="mt-1 text-xs text-amber-800">可到「稿件」页查看或撤回待审核稿件。</p>
+        </section>
       ) : null}
 
       <section className="product-surface p-4">
@@ -142,9 +165,9 @@ export function PostPage({
           maxLength={1000}
           placeholder="写下想投稿的内容，地点、时间、联系方式等信息尽量写清楚。"
           className="min-h-36 w-full resize-none rounded-none border-0 bg-white px-0 py-1 text-base leading-7 text-slate-900 shadow-none placeholder:text-slate-400 focus-visible:ring-0"
+          disabled={formDisabled}
           onChange={(event) => onPostTextChange(event.target.value)}
           onPaste={pasteImages}
-          disabled={busy}
         />
 
         <div className="mt-3 flex flex-wrap gap-2">
@@ -152,7 +175,7 @@ export function PostPage({
             <button
               key={item.id}
               className="relative h-[70px] w-[70px] overflow-hidden rounded-md border border-slate-200 bg-slate-100"
-              disabled={busy || item.status === "uploading" || item.status === "converting"}
+              disabled={formDisabled || item.status === "uploading" || item.status === "converting"}
               onClick={() => setAttachmentToRemove(item)}
             >
               {item.originalVideo && item.status === "converting" ? (
@@ -193,7 +216,7 @@ export function PostPage({
             <Button
               variant="outline"
               className="h-16 w-16 rounded-md border border-dashed border-slate-300 bg-white p-0 text-slate-500 shadow-none hover:bg-slate-50"
-              disabled={busy || hasConverting}
+              disabled={formDisabled || hasConverting}
               aria-label="添加图片或视频"
               onClick={() => inputRef.current?.click()}
             >
@@ -214,13 +237,30 @@ export function PostPage({
           可直接粘贴截图。
         </p>
 
+        {metadata.publishMode === "accumulate" ? (
+          <div className="mt-3 rounded-md border px-3 py-2 text-sm product-accent-blue">
+            <div className="flex items-center justify-between gap-3">
+              <span>
+                <span className="block font-semibold">单发</span>
+                <span className="block text-xs font-normal opacity-80">开启后审核通过立即单独发布，不进入批量等待。</span>
+              </span>
+              <Switch
+                checked={publishImmediately}
+                onCheckedChange={onPublishImmediatelyChange}
+                disabled={formDisabled}
+                aria-label="单发"
+              />
+            </div>
+          </div>
+        ) : null}
+
         <div className="mt-3 rounded-md border px-3 py-2 text-sm product-accent-green">
           <div className="flex items-center justify-between gap-3">
             <span>
               <span className="block font-semibold">匿名展示</span>
               <span className="block text-xs font-normal opacity-80">审核员仍可查看必要的投稿记录。</span>
             </span>
-            <Switch checked={anonymous} onCheckedChange={onAnonymousChange} disabled={busy} aria-label="匿名展示" />
+            <Switch checked={anonymous} onCheckedChange={onAnonymousChange} disabled={formDisabled} aria-label="匿名展示" />
           </div>
         </div>
 
@@ -247,7 +287,7 @@ export function PostPage({
                               ? "border-slate-700 bg-slate-700 text-white shadow-sm"
                               : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
                           }`}
-                          disabled={busy}
+                          disabled={formDisabled}
                           onClick={() => onBgColorChange(postBgColor === opt.value ? "" : opt.value)}
                         >
                           <span className="inline-block size-3.5 rounded-full border border-slate-200/50" style={{ backgroundColor: opt.hex }} />
@@ -271,7 +311,7 @@ export function PostPage({
                               ? "border-slate-700 bg-slate-700 text-white shadow-sm"
                               : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
                           }`}
-                          disabled={busy}
+                          disabled={formDisabled}
                           onClick={() => onTextColorChange(postTextColor === opt.value ? "" : opt.value)}
                         >
                           <span className="inline-block size-3.5 rounded-full border border-slate-200/50" style={{ backgroundColor: opt.hex }} />
@@ -299,7 +339,7 @@ export function PostPage({
                             ? "border-green-500 ring-2 ring-green-200"
                             : "border-slate-200 hover:border-slate-300"
                         }`}
-                        disabled={busy}
+                        disabled={formDisabled}
                         onClick={() => onAnonymousAvatarChange(anonymousAvatar === filename ? "" : filename)}
                         title={filename.replace(".svg", "")}
                       >
@@ -330,7 +370,7 @@ export function PostPage({
                             ? "border-slate-700 bg-slate-700 text-white shadow-sm"
                             : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
                         }`}
-                        disabled={busy}
+                        disabled={formDisabled}
                         onClick={() => onFontChange(postFont === opt.value ? "" : opt.value)}
                         title={opt.label}
                       >
@@ -349,14 +389,20 @@ export function PostPage({
         <PostRulesAction rules={rules} />
 
         <div className="mt-4 flex items-center gap-3">
-          <button className="campux-postbtn" disabled={busy || hasUploading || hasConverting || postText.trim().length === 0} onClick={handleSubmit}>
+          <button className="campux-postbtn" disabled={formDisabled || hasUploading || hasConverting || postText.trim().length === 0} onClick={handleSubmit}>
             <span>
               <SendIcon className="mr-1 inline size-4" />
-              {busy ? "提交中" : "提交投稿"}
+              {busy ? "提交中" : pendingLimitBlocked ? "暂不可投" : "提交投稿"}
             </span>
           </button>
           <span className="text-xs text-slate-500">
-            {hasConverting ? "视频上传转码中，请稍候" : hasUploading ? "图片上传中，请稍候" : "提交后进入审核"}
+            {pendingLimitBlocked
+              ? "请等待审核完成"
+              : hasConverting
+                ? "视频上传转码中，请稍候"
+                : hasUploading
+                  ? "图片上传中，请稍候"
+                  : "提交后进入审核"}
           </span>
         </div>
       </section>
@@ -371,7 +417,7 @@ export function PostPage({
             </p>
           </div>
           <Badge variant="secondary" className="rounded-md shadow-none">
-            可投稿
+            {pendingLimitBlocked ? "已达上限" : "可投稿"}
           </Badge>
         </div>
       </section>

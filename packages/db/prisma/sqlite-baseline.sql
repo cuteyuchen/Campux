@@ -154,6 +154,7 @@ CREATE TABLE "Post" (
     "bgColor" TEXT,
     "textColor" TEXT,
     "font" TEXT,
+    "publishImmediately" BOOLEAN NOT NULL DEFAULT false,
     "status" TEXT NOT NULL DEFAULT 'pending_approval',
     "publishSummary" TEXT,
     "recallIgnored" BOOLEAN NOT NULL DEFAULT false,

@@ -170,6 +170,7 @@ export type PostItem = {
   bgColor: string | null;
   textColor: string | null;
   font: string | null;
+  publishImmediately?: boolean;
   status: string;
   recallIgnored: boolean;
   recallIgnoredAt: string | null;

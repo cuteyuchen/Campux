@@ -24,9 +24,9 @@ import { findActiveBan, hasTenantRole } from "../lib/auth";
 import { buildCampuxLoginUrl } from "../lib/campux-login-url";
 import { prisma } from "../lib/prisma";
 import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedError } from "../lib/post-recall";
-import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText, type OneBotMessageSegment } from "../lib/private-posting";
+import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
-import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantOcrBlockedWordsEnabled } from "../lib/tenant-metadata";
+import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
 import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
 import { findBlockedWordsInPostImages, OcrUnavailableError } from "../lib/ocr";
 import {
@@ -84,12 +84,14 @@ import {
   formatReviewQueueMessages,
   formatRequeue,
   formatPrivatePostModePrompt,
+  formatPrivatePostPublishModePrompt,
   formatPrivatePostDraftPrompt,
   formatPrivatePostContinuePrompt,
   formatPrivatePostBodyStart,
   formatPrivatePostAppendAck,
   formatPrivatePostConfirmPrompt,
   formatPrivatePostCancelled,
+  formatPendingPostLimitBlocked,
   formatConfiguredPrivateHelp,
   formatPrivateCommandHelp,
   formatPrivateReplySent,
@@ -161,11 +163,24 @@ type PrivatePostDraft = {
   tenantId: string;
   text: string;
   anonymous: boolean;
+  publishImmediately: boolean;
   attachments: PostAttachment[];
   uploadedKeys: string[];
   updatedAt: number;
   history: PrivatePostHistoryEntry[];
   aiIntakeEnabled: boolean;
+};
+
+type PrivatePostPendingPublishMode = {
+  tenantId: string;
+  text: string;
+  attachments: PostAttachment[];
+  uploadedKeys: string[];
+  updatedAt: number;
+  history: PrivatePostHistoryEntry[];
+  aiIntakeEnabled: boolean;
+  initialAnonymous?: boolean | null;
+  submitAfterModeSelection?: boolean;
 };
 
 type PrivatePostPendingMode = {
@@ -176,6 +191,7 @@ type PrivatePostPendingMode = {
   updatedAt: number;
   history: PrivatePostHistoryEntry[];
   aiIntakeEnabled: boolean;
+  publishImmediately: boolean;
   submitAfterModeSelection?: boolean;
 };
 
@@ -268,6 +284,7 @@ export class OneBotRuntime {
   private readonly privateAutoReplyAt = new Map<string, number>();
   private readonly privateForwardBuffers = new Map<string, PrivateForwardBuffer>();
   private readonly privatePostAggregateBuffers = new Map<string, PrivatePostAggregateBuffer>();
+  private readonly privatePostPendingPublishModes = new Map<string, PrivatePostPendingPublishMode>();
   private readonly privatePostPendingModes = new Map<string, PrivatePostPendingMode>();
   private readonly privatePostPendingConfirms = new Map<string, PrivatePostPendingConfirm>();
   private readonly privatePostDrafts = new Map<string, PrivatePostDraft>();
@@ -1313,16 +1330,17 @@ export class OneBotRuntime {
       }
 
       const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
+      const existingPendingPublishMode = this.privatePostPendingPublishModes.get(draftKey);
       const existingPendingMode = this.privatePostPendingModes.get(draftKey);
       const existingPendingConfirm = this.privatePostPendingConfirms.get(draftKey);
       const existingDraft = this.privatePostDrafts.get(draftKey);
-      const semanticForExistingFlow = privatePostAiEnabled && (existingPendingMode || existingPendingConfirm || existingDraft)
+      const semanticForExistingFlow = privatePostAiEnabled && (existingPendingPublishMode || existingPendingMode || existingPendingConfirm || existingDraft)
         ? await analyzePrivatePostSemantics({
             tenantId: bot.tenantId,
             messageText: plainText,
-            currentDraftText: existingPendingMode?.text ?? existingPendingConfirm?.text ?? existingDraft?.text ?? "",
+            currentDraftText: existingPendingPublishMode?.text ?? existingPendingMode?.text ?? existingPendingConfirm?.text ?? existingDraft?.text ?? "",
             hasCurrentDraft: true,
-            imageCount: (existingPendingMode?.attachments.length ?? existingPendingConfirm?.attachments.length ?? existingDraft?.attachments.length ?? 0) + extractOneBotImageSegments(event.message).length,
+            imageCount: (existingPendingPublishMode?.attachments.length ?? existingPendingMode?.attachments.length ?? existingPendingConfirm?.attachments.length ?? existingDraft?.attachments.length ?? 0) + extractOneBotImageSegments(event.message).length,
             logger: this.logger,
           })
         : undefined;
@@ -1418,6 +1436,31 @@ export class OneBotRuntime {
           botQqUin,
           userQqUin,
         });
+        return;
+      }
+
+      const pendingPublishMode = existingPendingPublishMode;
+      if (pendingPublishMode) {
+        const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
+        const publishModeSelection = parsePrivatePostPublishModeText(plainText);
+        if (publishModeSelection) {
+          await this.selectPrivatePostPublishMode({
+            bot,
+            botQqUin,
+            userQqUin,
+            publishImmediately: publishModeSelection.publishImmediately,
+          });
+          return;
+        }
+
+        const hasImageContent = extractOneBotImageSegments(event.message).length > 0;
+        const hasTextContent = plainText.length > 0;
+        const shouldAppendContent = hasImageContent || (hasTextContent && (!privatePostAiEnabled || shouldAppendPrivatePostContentForSemantic(semanticForExistingFlow)));
+        const appended = shouldAppendContent
+          ? await this.appendPrivatePostContent({ bot, botQqUin, userQqUin, event, target: pendingPublishMode, semantic: semanticForExistingFlow })
+          : false;
+        const prompt = formatPrivatePostPublishModePrompt(privateStylishEnabled);
+        await this.sendPrivateMessage(botQqUin, userQqUin, appended ? `内容已保存。\n${prompt}` : prompt);
         return;
       }
 
@@ -1843,7 +1886,8 @@ export class OneBotRuntime {
     initialAnonymous?: boolean | undefined;
     registrationNotice?: string | null | undefined;
   }) {
-    await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
+    const access = await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
+    await this.assertPrivatePostPendingLimit(bot.tenantId, access.operator.id);
 
     const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
     const staged = await this.stagePrivatePostAttachments(bot, event);
@@ -1852,6 +1896,7 @@ export class OneBotRuntime {
       throw new BotWorkflowError("最多 9 张图片", 400);
     }
 
+    await this.clearPrivatePostPendingPublishMode(draftKey);
     await this.clearPrivatePostPending(draftKey);
     await this.clearPrivatePostDraft(draftKey);
     const text = (semantic?.intent === "post" && semantic.text ? semantic.text : body).trim();
@@ -1866,11 +1911,37 @@ export class OneBotRuntime {
     const anonymous = semantic?.intent === "post" && semantic.anonymous !== null
       ? semantic.anonymous
       : initialAnonymous ?? null;
+    const publishMode = await readTenantPublishMode(prisma, bot.tenantId);
+    const needsPublishModeChoice = publishMode.mode === "accumulate";
+    const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
+    const submitAfterModeSelection = shouldSubmitPrivatePostAfterModeSelection(semantic);
+
+    if (needsPublishModeChoice) {
+      this.privatePostPendingPublishModes.set(draftKey, {
+        tenantId: bot.tenantId,
+        text,
+        attachments,
+        uploadedKeys: staged.uploadedKeys,
+        updatedAt: Date.now(),
+        history,
+        aiIntakeEnabled,
+        initialAnonymous: anonymous,
+        submitAfterModeSelection,
+      });
+      await this.sendPrivateMessage(
+        botQqUin,
+        userQqUin,
+        appendMessageSuffix(formatPrivatePostPublishModePrompt(privateStylishEnabled), registrationNotice),
+      );
+      return;
+    }
+
     if (anonymous !== null) {
       this.privatePostDrafts.set(draftKey, {
         tenantId: bot.tenantId,
         text,
         anonymous,
+        publishImmediately: false,
         attachments,
         uploadedKeys: staged.uploadedKeys,
         updatedAt: Date.now(),
@@ -1881,7 +1952,6 @@ export class OneBotRuntime {
         await this.requestPrivatePostSubmitConfirmation({ bot, botQqUin, userQqUin, messageSuffix: registrationNotice });
         return;
       }
-      const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
       await this.sendPrivateMessage(botQqUin, userQqUin, appendMessageSuffix(formatPrivatePostBodyStart(privateStylishEnabled, aiIntakeEnabled), registrationNotice));
       return;
     }
@@ -1894,10 +1964,10 @@ export class OneBotRuntime {
       updatedAt: Date.now(),
       history,
       aiIntakeEnabled,
-      submitAfterModeSelection: shouldSubmitPrivatePostAfterModeSelection(semantic),
+      publishImmediately: false,
+      submitAfterModeSelection,
     });
 
-    const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
     const summary = this.formatPrivatePostPendingSummary(text, attachments.length, privateStylishEnabled, aiIntakeEnabled);
     await this.sendPrivateMessage(botQqUin, userQqUin, appendMessageSuffix(summary, registrationNotice));
   }
@@ -1914,7 +1984,7 @@ export class OneBotRuntime {
     botQqUin: string;
     userQqUin: string;
     event: OneBotMessageEvent;
-    target: PrivatePostDraft | PrivatePostPendingMode | PrivatePostPendingConfirm;
+    target: PrivatePostDraft | PrivatePostPendingPublishMode | PrivatePostPendingMode | PrivatePostPendingConfirm;
     semantic?: PrivatePostSemanticResult | undefined;
   }) {
     await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
@@ -1984,6 +2054,14 @@ export class OneBotRuntime {
     await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
 
     const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
+    const pendingPublishMode = this.privatePostPendingPublishModes.get(draftKey);
+    if (pendingPublishMode) {
+      await this.clearPrivatePostPendingPublishMode(draftKey);
+      const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
+      await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostCancelled(privateStylishEnabled));
+      return;
+    }
+
     const pending = this.privatePostPendingModes.get(draftKey);
     if (pending) {
       await this.clearPrivatePostPending(draftKey);
@@ -2139,6 +2217,23 @@ export class OneBotRuntime {
     return { operator, membership };
   }
 
+  private async assertPrivatePostPendingLimit(tenantId: string, authorId: string) {
+    const pendingPostLimit = await readTenantPendingPostLimit(prisma, tenantId);
+    if (pendingPostLimit <= 0) {
+      return;
+    }
+    const pendingCount = await prisma.post.count({
+      where: {
+        tenantId,
+        authorId,
+        status: "pending_approval",
+      },
+    });
+    if (pendingCount >= pendingPostLimit) {
+      throw new BotWorkflowError(formatPendingPostLimitBlocked(pendingCount, pendingPostLimit), 409);
+    }
+  }
+
   private async clearPrivatePostDraft(draftKey: string) {
     const existing = this.privatePostDrafts.get(draftKey);
     if (!existing) {
@@ -2148,6 +2243,19 @@ export class OneBotRuntime {
     if (this.config && existing.uploadedKeys.length > 0) {
       await deleteAttachmentObjects(this.config, existing.uploadedKeys).catch((error) => {
         this.logger.warn({ error, draftKey }, "failed to cleanup replaced private post draft attachments");
+      });
+    }
+  }
+
+  private async clearPrivatePostPendingPublishMode(draftKey: string) {
+    const existing = this.privatePostPendingPublishModes.get(draftKey);
+    if (!existing) {
+      return;
+    }
+    this.privatePostPendingPublishModes.delete(draftKey);
+    if (this.config && existing.uploadedKeys.length > 0) {
+      await deleteAttachmentObjects(this.config, existing.uploadedKeys).catch((error) => {
+        this.logger.warn({ error, draftKey }, "failed to cleanup pending private post publish-mode attachments");
       });
     }
   }
@@ -2334,6 +2442,70 @@ export class OneBotRuntime {
     return formatPrivatePostModePrompt(stylishEnabled, aiIntakeEnabled);
   }
 
+  private async selectPrivatePostPublishMode({
+    bot,
+    botQqUin,
+    userQqUin,
+    publishImmediately,
+  }: {
+    bot: { id: string; tenantId: string; qqUin: bigint; displayName?: string | null };
+    botQqUin: string;
+    userQqUin: string;
+    publishImmediately: boolean;
+  }) {
+    await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
+
+    const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
+    const pending = this.privatePostPendingPublishModes.get(draftKey);
+    if (!pending) {
+      await this.sendPrivateMessage(botQqUin, userQqUin, "请先发送“投稿”开始对话投稿。");
+      return;
+    }
+
+    this.privatePostPendingPublishModes.delete(draftKey);
+    const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
+    const anonymous = pending.initialAnonymous ?? null;
+
+    if (anonymous !== null) {
+      this.privatePostDrafts.set(draftKey, {
+        tenantId: pending.tenantId,
+        text: pending.text,
+        anonymous,
+        publishImmediately,
+        attachments: pending.attachments,
+        uploadedKeys: pending.uploadedKeys,
+        updatedAt: Date.now(),
+        history: pending.history,
+        aiIntakeEnabled: pending.aiIntakeEnabled,
+      });
+      if (pending.submitAfterModeSelection) {
+        await this.requestPrivatePostSubmitConfirmation({ bot, botQqUin, userQqUin });
+        return;
+      }
+      await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostBodyStart(privateStylishEnabled, pending.aiIntakeEnabled === true));
+      return;
+    }
+
+    this.privatePostPendingModes.set(draftKey, {
+      tenantId: pending.tenantId,
+      text: pending.text,
+      attachments: pending.attachments,
+      uploadedKeys: pending.uploadedKeys,
+      updatedAt: Date.now(),
+      history: pending.history,
+      aiIntakeEnabled: pending.aiIntakeEnabled,
+      publishImmediately,
+      ...(pending.submitAfterModeSelection !== undefined
+        ? { submitAfterModeSelection: pending.submitAfterModeSelection }
+        : {}),
+    });
+    await this.sendPrivateMessage(
+      botQqUin,
+      userQqUin,
+      formatPrivatePostModePrompt(privateStylishEnabled, pending.aiIntakeEnabled === true),
+    );
+  }
+
   private async selectPrivatePostMode({
     bot,
     botQqUin,
@@ -2359,6 +2531,7 @@ export class OneBotRuntime {
       tenantId: pending.tenantId,
       text: pending.text,
       anonymous,
+      publishImmediately: pending.publishImmediately,
       attachments: pending.attachments,
       uploadedKeys: pending.uploadedKeys,
       updatedAt: Date.now(),
@@ -2387,6 +2560,19 @@ export class OneBotRuntime {
     await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
 
     const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
+    const pendingPublishMode = this.privatePostPendingPublishModes.get(draftKey);
+    if (pendingPublishMode) {
+      const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+      const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
+      const undone = await this.popPrivatePostHistoryEntry(draftKey, pendingPublishMode, stylishEnabled);
+      if (!undone) {
+        await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostPublishModePrompt(privateStylishEnabled));
+        return;
+      }
+      await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostPublishModePrompt(privateStylishEnabled));
+      return;
+    }
+
     const pending = this.privatePostPendingModes.get(draftKey);
     if (pending) {
       const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
@@ -2432,7 +2618,7 @@ export class OneBotRuntime {
     await this.sendPrivateMessage(botQqUin, userQqUin, this.formatPrivatePostDraftSummary(draft.text, draft.attachments.length, draft.anonymous, privateStylishEnabled, draft.aiIntakeEnabled === true));
   }
 
-  private async popPrivatePostHistoryEntry(draftKey: string, target: PrivatePostDraft | PrivatePostPendingMode, stylishEnabled = false) {
+  private async popPrivatePostHistoryEntry(draftKey: string, target: PrivatePostDraft | PrivatePostPendingPublishMode | PrivatePostPendingMode, stylishEnabled = false) {
     const entry = target.history.pop();
     if (!entry) {
       return null;
@@ -2600,6 +2786,7 @@ export class OneBotRuntime {
                 displayId,
                 text,
                 anonymous: draft.anonymous,
+                publishImmediately: draft.publishImmediately,
                 attachments: draft.attachments,
                 status: initialStatus,
                 logs: {
@@ -3301,7 +3488,7 @@ export class OneBotRuntime {
       return;
     }
     this.clearPrivatePostAggregateBuffer(key);
-    if (this.privatePostDrafts.has(key) || this.privatePostPendingModes.has(key) || this.privatePostPendingConfirms.has(key)) {
+    if (this.privatePostDrafts.has(key) || this.privatePostPendingPublishModes.has(key) || this.privatePostPendingModes.has(key) || this.privatePostPendingConfirms.has(key)) {
       return;
     }
 

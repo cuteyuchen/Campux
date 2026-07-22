@@ -27,11 +27,15 @@ export function AppShell({
   postsPagination,
   anonymous,
   anonymousAvatar,
+  publishImmediately,
+  pendingLimitBlocked,
+  pendingLimitMessage,
   pendingAttachments,
   onActiveTabChange,
   onAdminTabChange,
   onAnonymousChange,
   onAnonymousAvatarChange,
+  onPublishImmediatelyChange,
   onBgColorChange,
   onTextColorChange,
   onFontChange,
@@ -67,11 +71,15 @@ export function AppShell({
   postsPagination: Pagination;
   anonymous: boolean;
   anonymousAvatar: string;
+  publishImmediately: boolean;
+  pendingLimitBlocked: boolean;
+  pendingLimitMessage: string | null;
   pendingAttachments: PendingAttachment[];
   onActiveTabChange: (tab: MainTab) => void;
   onAdminTabChange: (tab: AdminTab) => void;
   onAnonymousChange: (value: boolean) => void;
   onAnonymousAvatarChange: (value: string) => void;
+  onPublishImmediatelyChange: (value: boolean) => void;
   onBgColorChange: (value: string) => void;
   onTextColorChange: (value: string) => void;
   onFontChange: (value: string) => void;
@@ -119,10 +127,14 @@ export function AppShell({
                 postFont={postFont}
                 anonymous={anonymous}
                 anonymousAvatar={anonymousAvatar}
+                publishImmediately={publishImmediately}
+                pendingLimitBlocked={pendingLimitBlocked}
+                pendingLimitMessage={pendingLimitMessage}
                 selectedTenant={me.currentTenant}
                 pendingAttachments={pendingAttachments}
                 onAnonymousChange={onAnonymousChange}
                 onAnonymousAvatarChange={onAnonymousAvatarChange}
+                onPublishImmediatelyChange={onPublishImmediatelyChange}
                 onBgColorChange={onBgColorChange}
                 onTextColorChange={onTextColorChange}
                 onFontChange={onFontChange}

@@ -102,6 +102,13 @@ export function App() {
   const [postBgColor, setPostBgColor] = useState<string>("");
   const [postTextColor, setPostTextColor] = useState<string>("");
   const [postFont, setPostFont] = useState<string>("");
+  const [publishImmediately, setPublishImmediately] = useState(false);
+  const [pendingLimitStatus, setPendingLimitStatus] = useState<{
+    blocked: boolean;
+    pendingCount: number;
+    pendingPostLimit: number;
+    message: string | null;
+  } | null>(null);
   const [adminUserDetailTarget, setAdminUserDetailTarget] = useState<{ userId: string; nonce: number } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -225,14 +232,24 @@ export function App() {
   async function loadTenantData(page = postsPage) {
     setTenantDataLoading(true);
     try {
-      const [metadataData, postsData] = await Promise.all([
+      const [metadataData, postsData, pendingStatus] = await Promise.all([
         api<TenantMetadata>("/api/tenant/metadata"),
         api<{ posts: PostItem[]; pagination: Pagination }>(`/api/posts/mine?page=${page}&limit=${postsPagination.limit}`),
+        api<{
+          blocked: boolean;
+          pendingCount: number;
+          pendingPostLimit: number;
+          message: string | null;
+        }>("/api/posts/pending-limit-status"),
       ]);
       setMetadata(metadataData);
       setPosts(postsData.posts);
       setPostsPagination(postsData.pagination);
       setPostsPage(postsData.pagination.page);
+      setPendingLimitStatus(pendingStatus);
+      if (metadataData.publishMode !== "accumulate") {
+        setPublishImmediately(false);
+      }
     } finally {
       setTenantDataLoading(false);
     }
@@ -495,6 +512,10 @@ export function App() {
       toast.error("正文不能为空");
       return;
     }
+    if (pendingLimitStatus?.blocked) {
+      toast.error(pendingLimitStatus.message || "当前还有待审核稿件，请等待审核完成后再投稿。");
+      return;
+    }
     const submissionAttachments = [...pendingAttachments];
     const submissionAttachmentIds = new Set(submissionAttachments.map((attachment) => attachment.id));
     submissionBusyRef.current = true;
@@ -524,6 +545,7 @@ export function App() {
         postTextColor || undefined,
         postFont || undefined,
         anonymousAvatar || undefined,
+        metadata.publishMode === "accumulate" ? publishImmediately : false,
       );
       clearAttachments(submissionAttachmentIds);
       setPostText("");
@@ -532,11 +554,21 @@ export function App() {
       setPostBgColor("");
       setPostTextColor("");
       setPostFont("");
+      setPublishImmediately(false);
       toast.success("投稿已提交，等待审核。");
-      const data = await api<{ posts: PostItem[]; pagination: Pagination }>("/api/posts/mine?page=1&limit=10");
+      const [data, pendingStatus] = await Promise.all([
+        api<{ posts: PostItem[]; pagination: Pagination }>("/api/posts/mine?page=1&limit=10"),
+        api<{
+          blocked: boolean;
+          pendingCount: number;
+          pendingPostLimit: number;
+          message: string | null;
+        }>("/api/posts/pending-limit-status"),
+      ]);
       setPosts(data.posts);
       setPostsPagination(data.pagination);
       setPostsPage(1);
+      setPendingLimitStatus(pendingStatus);
       setActiveTab("posts");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "投稿失败";
@@ -686,11 +718,15 @@ export function App() {
       postsPagination={postsPagination}
       anonymous={anonymous}
       anonymousAvatar={anonymousAvatar}
+      publishImmediately={publishImmediately}
+      pendingLimitBlocked={Boolean(pendingLimitStatus?.blocked)}
+      pendingLimitMessage={pendingLimitStatus?.message ?? null}
       pendingAttachments={pendingAttachments}
       onActiveTabChange={setActiveTab}
       onAdminTabChange={setAdminSubTab}
       onAnonymousChange={(value) => mutateSubmissionForm(() => setAnonymous(value))}
       onAnonymousAvatarChange={(value) => mutateSubmissionForm(() => setAnonymousAvatar(value))}
+      onPublishImmediatelyChange={(value) => mutateSubmissionForm(() => setPublishImmediately(value))}
       onBgColorChange={(value) => mutateSubmissionForm(() => setPostBgColor(value))}
       onTextColorChange={(value) => mutateSubmissionForm(() => setPostTextColor(value))}
       onFontChange={(value) => mutateSubmissionForm(() => setPostFont(value))}

@@ -276,9 +276,18 @@ export function formatPrivatePostAutoRegistrationNotice(
 ): string | null {
   if (result.alreadyHadTenantAccess) return null;
   if (result.password) {
-    return `检测到当前账号未注册，已自动注册。\n初始密码：${result.password}\n\n当前对话投稿流程已开始。\n也可以登录网站投稿：${loginUrl}`;
+    return `初始密码：${result.password}\n也可以登录网站投稿：${loginUrl}`;
   }
-  return `已自动开通当前墙权限，登录密码沿用原账号。\n\n当前对话投稿流程已开始。\n也可以登录网站投稿：${loginUrl}`;
+  return `登录密码沿用原账号。\n也可以登录网站投稿：${loginUrl}`;
+}
+
+export function formatPrivatePostPublishModePrompt(stylishEnabled = false): string {
+  if (!stylishEnabled) return privatePostPublishModeDefault;
+  return pick(privatePostPublishModeStylish);
+}
+
+export function formatPendingPostLimitBlocked(pendingCount: number, limit: number): string {
+  return `你还有 ${pendingCount} 条稿件待审核，当前校园墙最多同时保留 ${limit} 条待审核稿件。请等待审核完成后再投稿。`;
 }
 
 const privatePostStatusLabels: Record<string, string> = {
@@ -659,6 +668,13 @@ export function formatQZoneAutoRefreshReason(reason: string): string {
 }
 
 // ── 对话投稿提示 ──────────────────────────────────────
+
+const privatePostPublishModeDefault = "是否单发？回复“单发”立即单独发布，或“批量”等待与其他稿件合并发布。";
+const privatePostPublishModeStylish = [
+  "⚡ 是否单发？回复“单发”或“批量”。",
+  "📦 请选择“单发”或“批量”。",
+  privatePostPublishModeDefault,
+];
 
 const privatePostModeDefault = "请选择“匿名”或“实名”。";
 const privatePostModeAiDefault =

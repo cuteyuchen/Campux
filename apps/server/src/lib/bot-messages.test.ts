@@ -15,6 +15,8 @@ import {
   formatPrivatePostDraftPrompt,
   formatPrivatePostHistory,
   formatPrivatePostModePrompt,
+  formatPrivatePostPublishModePrompt,
+  formatPendingPostLimitBlocked,
   formatPrivatePostWithdrawPrompt,
   formatRecallRequestNotification,
   formatRegisterAlready,
@@ -98,11 +100,12 @@ describe("bot registration messages", () => {
       .toBeNull();
   });
 
-  test("posting auto-registration notice includes the initial password and posting choices", () => {
+  test("posting auto-registration notice only appends password and website login guidance", () => {
     const message = formatPrivatePostAutoRegistrationNotice({ password: "InitPass9", alreadyHadTenantAccess: false }, loginUrl);
-    expect(message).toContain("检测到当前账号未注册，已自动注册");
-    expect(message).toContain("InitPass9");
-    expectPostingEntryGuidance(message!);
+    expect(message).toContain("初始密码：InitPass9");
+    expect(message).toContain(`也可以登录网站投稿：${loginUrl}`);
+    expect(message).not.toContain("检测到当前账号未注册");
+    expect(message).not.toContain("当前对话投稿流程已开始");
     expect(formatPrivatePostAutoRegistrationNotice({ password: null, alreadyHadTenantAccess: true }, loginUrl)).toBeNull();
   });
 
@@ -194,11 +197,13 @@ describe("bot private post messages", () => {
   });
 
   test("only shows the required command for each posting stage", () => {
+    expect(formatPrivatePostPublishModePrompt(false)).toContain("单发");
     expect(formatPrivatePostModePrompt(false, false)).toBe("请选择“匿名”或“实名”。");
     expect(formatPrivatePostAppendAck(false)).toBe("已添加，完成后说“结束”。");
     expect(formatPrivatePostContinuePrompt(false)).toBe("请继续发送投稿内容，完成后说“结束”。");
     expect(formatPrivatePostCancelled(false)).toBe("已取消本次投稿。");
     expect(formatSubmissionSuccess(123, false)).toBe("投稿成功，稿件编号 #123，请等待审核。");
+    expect(formatPendingPostLimitBlocked(1, 1)).toContain("待审核");
   });
 
   test("formats the latest five post states and withdrawal hint", () => {

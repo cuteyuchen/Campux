@@ -288,7 +288,7 @@ export async function reviewPostViaBot({
 
   if (action === "approve") {
     const publishMode = await readTenantPublishMode(prisma, bot.tenantId);
-    if (publishMode.mode === "accumulate") {
+    if (publishMode.mode === "accumulate" && !reviewed.publishImmediately) {
       await addApprovedPostToBatch(queue, bot.tenantId, post.id, operator.id);
     } else {
       await enqueuePublishFanout(queue, bot.tenantId, post.id, operator.id);
@@ -321,7 +321,7 @@ export async function approveAllPendingPostsViaBot({
       tenantId: bot.tenantId,
       status: "pending_approval",
     },
-    select: { id: true, displayId: true, status: true },
+    select: { id: true, displayId: true, status: true, publishImmediately: true },
     orderBy: { createdAt: "asc" },
   });
 
@@ -375,7 +375,7 @@ export async function approveAllPendingPostsViaBot({
       },
     });
 
-    if (publishMode.mode === "accumulate") {
+    if (publishMode.mode === "accumulate" && !post.publishImmediately) {
       await addApprovedPostToBatch(queue, bot.tenantId, post.id, operator.id);
     } else {
       await enqueuePublishFanout(queue, bot.tenantId, post.id, operator.id);

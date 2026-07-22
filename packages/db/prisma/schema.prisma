@@ -239,12 +239,13 @@ model Post {
   legacyUuid      String?
   text            String
   attachments     Json             @default("[]")
-  anonymous       Boolean          @default(false)
-  anonymousAvatar String?
-  bgColor         String?
-  textColor       String?
-  font            String?
-  status          PostStatus       @default(pending_approval)
+  anonymous            Boolean          @default(false)
+  anonymousAvatar      String?
+  bgColor              String?
+  textColor            String?
+  font                 String?
+  publishImmediately   Boolean          @default(false)
+  status               PostStatus       @default(pending_approval)
   publishSummary  String?
   recallIgnored   Boolean          @default(false)
   recallIgnoredAt DateTime?

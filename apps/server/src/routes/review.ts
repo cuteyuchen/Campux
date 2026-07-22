@@ -214,7 +214,7 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
       },
     });
     const publishMode = await readTenantPublishMode(prisma, context.selectedTenant.id);
-    if (publishMode.mode === "accumulate") {
+    if (publishMode.mode === "accumulate" && !post.publishImmediately) {
       await addApprovedPostToBatch(queue, context.selectedTenant.id, post.id, context.user.id, request.log);
     } else {
       await enqueuePublishFanout(queue, context.selectedTenant.id, post.id, context.user.id);
@@ -236,7 +236,7 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
         tenantId: context.selectedTenant.id,
         status: "pending_approval",
       },
-      select: { id: true, displayId: true, status: true },
+      select: { id: true, displayId: true, status: true, publishImmediately: true },
       orderBy: { createdAt: "asc" },
     });
 
@@ -280,7 +280,7 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
         },
       });
 
-      if (publishMode.mode === "accumulate") {
+      if (publishMode.mode === "accumulate" && !post.publishImmediately) {
         await addApprovedPostToBatch(queue, context.selectedTenant.id, post.id, context.user.id, request.log);
       } else {
         await enqueuePublishFanout(queue, context.selectedTenant.id, post.id, context.user.id);

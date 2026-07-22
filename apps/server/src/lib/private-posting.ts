@@ -90,6 +90,17 @@ export function parsePrivatePostModeText(input: string) {
   return null;
 }
 
+export function parsePrivatePostPublishModeText(input: string) {
+  const normalized = normalizeControlText(input);
+  if (/^(?:单发|单独发布|立即发布|单独发|立即发)$/.test(normalized)) {
+    return { publishImmediately: true };
+  }
+  if (/^(?:批量|批量发布|合并发布|等批量|走批量|不单发)$/.test(normalized)) {
+    return { publishImmediately: false };
+  }
+  return null;
+}
+
 export function parsePrivatePostStartModeText(input: string) {
   const trimmed = stripZeroWidthChars(input).trim().replace(/^(?:#|＃|\/)\s*/, "");
   const match = trimmed.match(/^(匿名|实名)投稿(?:$|[\s:：])/);
