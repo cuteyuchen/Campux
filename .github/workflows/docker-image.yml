@@ -77,7 +77,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:main
+            ${{ env.IMAGE_NAME }}:last
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           build-args: |
             CAMPUX_BUILD_VERSION=main-${{ github.sha }}
@@ -94,7 +94,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.OCR_IMAGE_NAME }}:main
+            ${{ env.OCR_IMAGE_NAME }}:last
             ${{ env.OCR_IMAGE_NAME }}:sha-${{ github.sha }}
           cache-from: type=gha,scope=campux-ocr
           cache-to: type=gha,mode=max,scope=campux-ocr
