@@ -377,6 +377,7 @@ export class OneBotRuntime {
     const attachments = Array.isArray(post.attachments) ? post.attachments : [];
     const imageCount = attachments.filter((a: any) => a.kind === "image").length;
     const channel = post.logs?.some((log) => log.comment.includes("私聊")) ? "private" : "web";
+    const publishMode = await readTenantPublishMode(prisma, post.tenantId);
     const lines = formatNewPostReviewNotification(
       post.tenant.name,
       post.displayId,
@@ -386,6 +387,8 @@ export class OneBotRuntime {
       post.text,
       imageCount,
       channel,
+      publishMode.mode,
+      Boolean(post.publishImmediately),
     );
     const attachmentSegments = await this.loadPostAttachmentSegments(post.attachments);
     const message =
@@ -1233,108 +1236,143 @@ export class OneBotRuntime {
       const privatePostAggregateDelaySeconds = Math.max(0, Math.min(120, Math.trunc(aiSettings.rules.privatePostAggregateDelaySeconds ?? 8)));
       const extraKeywords = aiSettings.rules.postTriggerKeywords;
 
-      const privateCommand = parsePrivateCommand(plainText);
-      if (privateCommand?.name === "注册账号") {
-        const execution = await this.registerPrivateUser({ bot, botQqUin, userQqUin, event });
-        if (!execution.shouldAnnounce) {
-          return;
-        }
-        const loginUrl = await this.resolveCampuxLoginUrl(bot.tenantId);
-        const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
-        const message = formatFirstPrivateMessageRegistrationNotice(execution.result, loginUrl, stylishEnabled)
-          ?? formatRegisterAlready(loginUrl, stylishEnabled);
-        await this.sendPrivateMessage(botQqUin, userQqUin, message);
-        return;
-      }
-
-      const registrationNotice = shouldAutoRegisterPrivateText(plainText)
-        ? await this.ensurePrivatePostRegistration({ bot, botQqUin, userQqUin, event })
-        : null;
-
-      if (isPrivateHelpCommandText(plainText)) {
-        const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
-        const commandHelp = formatPrivateCommandHelp(stylishEnabled);
-        await this.sendPrivateMessage(
-          botQqUin,
-          userQqUin,
-          registrationNotice ? `${registrationNotice}\n\n${commandHelp}` : commandHelp,
-        );
-        return;
-      }
-
-      const startBody = parsePrivatePostStartText(plainText, {
-        extraKeywords,
-        aiIntakeEnabled: privatePostAiEnabled,
-      });
-      if (startBody !== null) {
-        const startMode = parsePrivatePostStartModeText(plainText);
-        this.clearPrivatePostAggregateBuffer(this.getPrivatePostDraftKey(botQqUin, userQqUin));
-        try {
-          await this.startPrivatePostDraft({
-            bot,
-            botQqUin,
-            userQqUin,
-            event,
-            body: startBody,
-            aiIntakeEnabled: privatePostAiEnabled,
-            initialAnonymous: startMode?.anonymous,
-            registrationNotice,
-          });
-        } catch (error) {
-          if (registrationNotice) {
-            await this.sendPrivateMessage(botQqUin, userQqUin, registrationNotice).catch(() => undefined);
-          }
-          throw error;
-        }
-        return;
-      }
-
-      if (registrationNotice) {
-        await this.sendPrivateMessage(botQqUin, userQqUin, registrationNotice);
-      }
-
-      const managementCommand = parsePrivatePostManagementCommand(plainText);
-      if (managementCommand?.name === "history") {
-        await this.sendPrivatePostHistory(bot, botQqUin, userQqUin);
-        return;
-      }
-      if (managementCommand?.name === "withdraw_list") {
-        await this.sendPrivatePostWithdrawPrompt(bot, botQqUin, userQqUin);
-        return;
-      }
-      if (managementCommand?.name === "withdraw") {
-        await this.handlePrivatePostWithdrawal({
-          bot,
-          botQqUin,
-          userQqUin,
-          displayId: managementCommand.displayId,
-          reason: managementCommand.reason,
-        });
-        return;
-      }
-
-      if (privateCommand?.name === "重置密码") {
-        if (registrationNotice) {
-          return;
-        }
-        const reset = await this.privatePasswordResetCoordinator.run(
-          `${bot.tenantId}:${userQqUin}`,
-          () => resetPasswordViaBot({ botQqUin, userQqUin }),
-        );
-        if (!reset.shouldAnnounce) {
-          return;
-        }
-        const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
-        await this.sendPrivateMessage(botQqUin, userQqUin, formatResetPassword(reset.result.password, stylishEnabled));
-        return;
-      }
-
       const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
       const existingPendingPublishMode = this.privatePostPendingPublishModes.get(draftKey);
       const existingPendingMode = this.privatePostPendingModes.get(draftKey);
       const existingPendingConfirm = this.privatePostPendingConfirms.get(draftKey);
       const existingDraft = this.privatePostDrafts.get(draftKey);
-      const semanticForExistingFlow = privatePostAiEnabled && (existingPendingPublishMode || existingPendingMode || existingPendingConfirm || existingDraft)
+      const hasActivePrivatePostFlow = Boolean(
+        existingPendingPublishMode || existingPendingMode || existingPendingConfirm || existingDraft,
+      );
+      const privateCommand = parsePrivateCommand(plainText);
+      let registrationNotice: string | null = null;
+
+      // 投稿流程外的全局指令：仅在无活跃草稿时处理，避免重复进入或打断当前投稿。
+      if (!hasActivePrivatePostFlow) {
+        if (privateCommand?.name === "注册账号") {
+          const execution = await this.registerPrivateUser({ bot, botQqUin, userQqUin, event });
+          if (!execution.shouldAnnounce) {
+            return;
+          }
+          const loginUrl = await this.resolveCampuxLoginUrl(bot.tenantId);
+          const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+          const message = formatFirstPrivateMessageRegistrationNotice(execution.result, loginUrl, stylishEnabled)
+            ?? formatRegisterAlready(loginUrl, stylishEnabled);
+          await this.sendPrivateMessage(botQqUin, userQqUin, message);
+          return;
+        }
+
+        registrationNotice = shouldAutoRegisterPrivateText(plainText)
+          ? await this.ensurePrivatePostRegistration({ bot, botQqUin, userQqUin, event })
+          : null;
+
+        if (isPrivateHelpCommandText(plainText)) {
+          const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+          const commandHelp = formatPrivateCommandHelp(stylishEnabled);
+          await this.sendPrivateMessage(
+            botQqUin,
+            userQqUin,
+            registrationNotice ? `${registrationNotice}\n\n${commandHelp}` : commandHelp,
+          );
+          return;
+        }
+
+        const startBody = parsePrivatePostStartText(plainText, {
+          extraKeywords,
+          aiIntakeEnabled: privatePostAiEnabled,
+        });
+        if (startBody !== null) {
+          const startMode = parsePrivatePostStartModeText(plainText);
+          this.clearPrivatePostAggregateBuffer(draftKey);
+          try {
+            await this.startPrivatePostDraft({
+              bot,
+              botQqUin,
+              userQqUin,
+              event,
+              body: startBody,
+              aiIntakeEnabled: privatePostAiEnabled,
+              initialAnonymous: startMode?.anonymous,
+              registrationNotice,
+            });
+          } catch (error) {
+            if (registrationNotice) {
+              await this.sendPrivateMessage(botQqUin, userQqUin, registrationNotice).catch(() => undefined);
+            }
+            throw error;
+          }
+          return;
+        }
+
+        if (registrationNotice) {
+          await this.sendPrivateMessage(botQqUin, userQqUin, registrationNotice);
+        }
+
+        const managementCommand = parsePrivatePostManagementCommand(plainText);
+        if (managementCommand?.name === "history") {
+          await this.sendPrivatePostHistory(bot, botQqUin, userQqUin);
+          return;
+        }
+        if (managementCommand?.name === "withdraw_list") {
+          await this.sendPrivatePostWithdrawPrompt(bot, botQqUin, userQqUin);
+          return;
+        }
+        if (managementCommand?.name === "withdraw") {
+          await this.handlePrivatePostWithdrawal({
+            bot,
+            botQqUin,
+            userQqUin,
+            displayId: managementCommand.displayId,
+            reason: managementCommand.reason,
+          });
+          return;
+        }
+
+        if (privateCommand?.name === "重置密码") {
+          if (registrationNotice) {
+            return;
+          }
+          const reset = await this.privatePasswordResetCoordinator.run(
+            `${bot.tenantId}:${userQqUin}`,
+            () => resetPasswordViaBot({ botQqUin, userQqUin }),
+          );
+          if (!reset.shouldAnnounce) {
+            return;
+          }
+          const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+          await this.sendPrivateMessage(botQqUin, userQqUin, formatResetPassword(reset.result.password, stylishEnabled));
+          return;
+        }
+      } else if (!isPrivatePostUndoText(plainText) && !isPrivatePostCancelText(plainText) && !isPrivatePostFinishText(plainText) && !isPrivatePostEditText(plainText)) {
+        // 流程内忽略流程外指令（投稿/帮助/注册/重置密码/稿件/撤回编号等）。
+        // 裸「撤回」走流程内 undo，不在此拦截。
+        const startBody = parsePrivatePostStartText(plainText, {
+          extraKeywords,
+          aiIntakeEnabled: privatePostAiEnabled,
+        });
+        const managementCommand = parsePrivatePostManagementCommand(plainText);
+        const isOutOfFlowCommand = startBody !== null
+          || isPrivateHelpCommandText(plainText)
+          || privateCommand?.name === "注册账号"
+          || privateCommand?.name === "重置密码"
+          || managementCommand?.name === "history"
+          || managementCommand?.name === "withdraw"
+          || managementCommand?.name === "withdraw_list";
+        if (isOutOfFlowCommand) {
+          await this.replyPrivatePostStagePrompt({
+            bot,
+            botQqUin,
+            userQqUin,
+            pendingPublishMode: existingPendingPublishMode,
+            pendingMode: existingPendingMode,
+            pendingConfirm: existingPendingConfirm,
+            draft: existingDraft,
+          });
+          return;
+        }
+      }
+
+      const semanticForExistingFlow = privatePostAiEnabled && hasActivePrivatePostFlow
         ? await analyzePrivatePostSemantics({
             tenantId: bot.tenantId,
             messageText: plainText,
@@ -2427,6 +2465,54 @@ export class OneBotRuntime {
     }
 
     throw new BotWorkflowError("无法读取图片附件，请重新发送图片", 400);
+  }
+
+  private async replyPrivatePostStagePrompt({
+    bot,
+    botQqUin,
+    userQqUin,
+    pendingPublishMode,
+    pendingMode,
+    pendingConfirm,
+    draft,
+  }: {
+    bot: { tenantId: string };
+    botQqUin: string;
+    userQqUin: string;
+    pendingPublishMode?: PrivatePostPendingPublishMode | undefined;
+    pendingMode?: PrivatePostPendingMode | undefined;
+    pendingConfirm?: PrivatePostPendingConfirm | undefined;
+    draft?: PrivatePostDraft | undefined;
+  }) {
+    const privateStylishEnabled = await readTenantBotPrivatePostStylishEnabled(prisma, bot.tenantId);
+    if (pendingPublishMode) {
+      await this.sendPrivateMessage(botQqUin, userQqUin, formatPrivatePostPublishModePrompt(privateStylishEnabled));
+      return;
+    }
+    if (pendingMode) {
+      await this.sendPrivateMessage(
+        botQqUin,
+        userQqUin,
+        formatPrivatePostModePrompt(privateStylishEnabled, pendingMode.aiIntakeEnabled === true),
+      );
+      return;
+    }
+    if (pendingConfirm) {
+      const previewText = resolvePrivatePostSubmissionText(pendingConfirm.text, pendingConfirm.attachments.length);
+      await this.sendPrivateMessage(
+        botQqUin,
+        userQqUin,
+        formatPrivatePostConfirmPrompt(previewText, pendingConfirm.attachments.length, pendingConfirm.aiIntakeEnabled),
+      );
+      return;
+    }
+    if (draft) {
+      await this.sendPrivateMessage(
+        botQqUin,
+        userQqUin,
+        formatPrivatePostDraftPrompt(privateStylishEnabled, draft.aiIntakeEnabled),
+      );
+    }
   }
 
   private formatPrivatePostDraftSummary(text: string, attachmentCount: number, anonymous: boolean, stylishEnabled = false, aiIntakeEnabled = false) {

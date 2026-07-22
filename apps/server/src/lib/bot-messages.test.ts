@@ -136,8 +136,8 @@ describe("bot private post messages", () => {
   test("explains the next action for non-AI intake", () => {
     const message = formatPrivatePostBodyStart(false, false);
 
-    expect(message).toBe("请发送投稿内容，完成后说“结束”。");
-    expect(message).not.toContain("撤回");
+    expect(message).toBe("请发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。");
+    expect(message).toContain("撤回");
     expect(message).not.toContain("取消");
     expect(message).not.toContain("默认文字");
   });
@@ -145,7 +145,7 @@ describe("bot private post messages", () => {
   test("uses semantic edit-state copy for AI intake", () => {
     const message = formatPrivatePostBodyStart(false, true);
 
-    expect(message).toBe("请发送投稿内容，完成后说“结束”。");
+    expect(message).toBe("请发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。");
   });
 
   test("uses semantic stylish edit-state copy for AI intake", () => {
@@ -156,7 +156,7 @@ describe("bot private post messages", () => {
         const message = formatPrivatePostBodyStart(true, true);
 
         expect(message).toContain("结束");
-        expect(message).not.toContain("撤回");
+        expect(message).toContain("撤回");
         expect(message).not.toContain("取消");
         expect(message).not.toContain("默认文字");
       }
@@ -168,7 +168,7 @@ describe("bot private post messages", () => {
   test("uses semantic draft copy for AI intake", () => {
     const message = formatPrivatePostDraftPrompt(false, true);
 
-    expect(message).toBe("请继续发送投稿内容，完成后说“结束”。");
+    expect(message).toBe("请继续发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。");
   });
 
   test("uses semantic stylish draft copy for AI intake", () => {
@@ -179,7 +179,7 @@ describe("bot private post messages", () => {
         const message = formatPrivatePostDraftPrompt(true, true);
 
         expect(message).toContain("结束");
-        expect(message).not.toContain("撤回");
+        expect(message).toContain("撤回");
         expect(message).not.toContain("取消");
         expect(message).not.toContain("默认文字");
       }
@@ -199,8 +199,8 @@ describe("bot private post messages", () => {
   test("only shows the required command for each posting stage", () => {
     expect(formatPrivatePostPublishModePrompt(false)).toContain("单发");
     expect(formatPrivatePostModePrompt(false, false)).toBe("请选择“匿名”或“实名”。");
-    expect(formatPrivatePostAppendAck(false)).toBe("已添加，完成后说“结束”。");
-    expect(formatPrivatePostContinuePrompt(false)).toBe("请继续发送投稿内容，完成后说“结束”。");
+    expect(formatPrivatePostAppendAck(false)).toBe("已添加，完成后说“结束”。发送“撤回”可撤回上一条。");
+    expect(formatPrivatePostContinuePrompt(false)).toBe("请继续发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。");
     expect(formatPrivatePostCancelled(false)).toBe("已取消本次投稿。");
     expect(formatSubmissionSuccess(123, false)).toBe("投稿成功，稿件编号 #123，请等待审核。");
     expect(formatPendingPostLimitBlocked(1, 1)).toContain("待审核");

@@ -340,13 +340,13 @@ export function formatPrivatePostWithdrawPrompt(items: Array<{ displayId: number
 
 // ── 对话投稿正文编辑引导（选择模式后一次性提示） ──────
 
-const privatePostBodyStartDefault = "请发送投稿内容，完成后说“结束”。";
+const privatePostBodyStartDefault = "请发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。";
 const privatePostBodyStartAiDefault =
   privatePostBodyStartDefault;
 
 const privatePostBodyStartStylish = [
-  "📝 请发送投稿内容，完成后说“结束”。",
-  "✏️ 可以开始发送内容了，完成后说“结束”。",
+  "📝 请发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。",
+  "✏️ 可以开始发送内容了，完成后说“结束”。发送“撤回”可撤回上一条。",
   privatePostBodyStartDefault,
 ];
 const privatePostBodyStartAiStylish = [
@@ -365,11 +365,11 @@ export function formatPrivatePostBodyStart(stylishEnabled = false, aiIntakeEnabl
 
 // ── 对话投稿追加确认（简短版，不重复完整内容） ────────
 
-const privatePostAppendAckDefault = "已添加，完成后说“结束”。";
+const privatePostAppendAckDefault = "已添加，完成后说“结束”。发送“撤回”可撤回上一条。";
 
 const privatePostAppendAckStylish = [
-  "✅ 已添加，完成后说“结束”。",
-  "📎 已加入稿件，完成后说“结束”。",
+  "✅ 已添加，完成后说“结束”。发送“撤回”可撤回上一条。",
+  "📎 已加入稿件，完成后说“结束”。发送“撤回”可撤回上一条。",
   privatePostAppendAckDefault,
 ];
 
@@ -487,9 +487,14 @@ export function formatNewPostReviewNotification(
   text: string,
   imageCount: number,
   channel: "web" | "private" = "web",
+  publishMode: "single" | "accumulate" = "single",
+  publishImmediately = false,
 ): string[] {
   const attachmentSummary = imageCount > 0 ? `图片：${imageCount} 张` : "图片：0 张";
   const channelLabel = channel === "private" ? "对话投稿" : "网页投稿";
+  const publishLabel = publishMode === "accumulate"
+    ? (publishImmediately ? "单发" : "批量")
+    : "单发";
   const authorLine = anonymous
     ? `投稿人：匿名（QQ ${qqUin.toString()}）`
     : `投稿人：${authorDisplay}（QQ ${qqUin.toString()}）`;
@@ -499,6 +504,7 @@ export function formatNewPostReviewNotification(
     `编号：#${displayId}`,
     authorLine,
     `来源：${channelLabel}`,
+    `发布：${publishLabel}`,
     attachmentSummary,
     "",
     escapeCqCode(text),
@@ -701,13 +707,13 @@ export function formatPrivatePostModePrompt(stylishEnabled = false, aiIntakeEnab
 
 // ── 对话投稿草稿提示 ──────────────────────────────────
 
-const privatePostDraftDefault = "请继续发送投稿内容，完成后说“结束”。";
+const privatePostDraftDefault = "请继续发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。";
 const privatePostDraftAiDefault =
   privatePostDraftDefault;
 
 const privatePostDraftStylish = [
-  "📎 请继续发送投稿内容，完成后说“结束”。",
-  "还可以继续补充，完成后说“结束”。",
+  "📎 请继续发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。",
+  "还可以继续补充，完成后说“结束”。发送“撤回”可撤回上一条。",
   privatePostDraftDefault,
 ];
 const privatePostDraftAiStylish = [
@@ -726,11 +732,11 @@ export function formatPrivatePostDraftPrompt(stylishEnabled = false, aiIntakeEna
 
 // ── 对话投稿继续编辑提示 ──────────────────────────────
 
-const privatePostContinueDefault = "请继续发送投稿内容，完成后说“结束”。";
+const privatePostContinueDefault = "请继续发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。";
 
 const privatePostContinueStylish = [
-  "📝 请继续发送投稿内容，完成后说“结束”。",
-  "还可以继续补充，完成后说“结束”。",
+  "📝 请继续发送投稿内容，完成后说“结束”。发送“撤回”可撤回上一条。",
+  "还可以继续补充，完成后说“结束”。发送“撤回”可撤回上一条。",
   privatePostContinueDefault,
 ];
 
@@ -755,7 +761,7 @@ function formatPrivatePostPreview(text: string, attachmentCount: number) {
 
 export function formatPrivatePostConfirmPrompt(text: string, attachmentCount: number, aiIntakeEnabled = false): string {
   void aiIntakeEnabled;
-  const actionHint = "回复“确认”提交，回复“取消”放弃。\n需要修改可继续发送内容。";
+  const actionHint = "回复“确认”提交，回复“取消”放弃。\n需要修改可继续发送内容；发送“撤回”可撤回上一条。";
   return [formatPrivatePostPreview(text, attachmentCount), "", actionHint].join("\n");
 }
 

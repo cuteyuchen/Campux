@@ -259,6 +259,7 @@ export function PostsPage({
   mineLoading,
   autoFollowOwnPosts,
   enableMarkdownRender,
+  publishMode = "single",
   onMinePageChange,
   onTabChange,
   onRefresh,
@@ -272,6 +273,7 @@ export function PostsPage({
   mineLoading: boolean;
   autoFollowOwnPosts: boolean;
   enableMarkdownRender?: boolean;
+  publishMode?: "single" | "accumulate";
   onMinePageChange: (page: number) => void;
   onTabChange: (tab: PostsTab) => void;
   onRefresh: () => Promise<void>;
@@ -940,6 +942,7 @@ export function PostsPage({
                 busyCancelPostId={busyCancelPostId}
                 busyRecallPostId={busyRecallPostId}
                 busyFollowPostId={busyFollowPostId}
+                publishMode={publishMode}
                 onPreview={(post) => void openRenderPreview(post)}
                 onImagePreview={(post, images, index) => openImagePreview(images, index, `稿件 ${post.displayId} 上传图片`)}
                 onCancel={(post) => void cancelPost(post.id)}
@@ -962,6 +965,7 @@ export function PostsPage({
                 busyCancelPostId={busyCancelPostId}
                 busyRecallPostId={busyRecallPostId}
                 busyFollowPostId={busyFollowPostId}
+                publishMode={publishMode}
                 onPreview={(post) => void openRenderPreview(post)}
                 onImagePreview={(post, images, index) => openImagePreview(images, index, `稿件 ${post.displayId} 上传图片`)}
                 onCancel={(post) => void cancelPost(post.id)}
@@ -1109,6 +1113,7 @@ export function PostsPage({
                 posts={pendingRecallPosts}
                 loading={pendingRecallLoading}
                 busyPostId={busyPostId}
+                publishMode={publishMode}
                 onPreview={(post) => void openRenderPreview(post)}
                 onImagePreview={(post, images, index) => openImagePreview(images, index, `稿件 ${post.displayId} 上传图片`)}
                 onRecallApprove={(post) => setRecallConfirm({ open: true, mode: "approve", post })}
@@ -1124,6 +1129,7 @@ export function PostsPage({
                     posts={filteredReviewPosts}
                     busyPostId={busyPostId}
                     isAdmin={isAdmin}
+                    publishMode={publishMode}
                     onPreview={(post) => void openRenderPreview(post)}
                     onImagePreview={(post, images, index) => openImagePreview(images, index, `稿件 ${post.displayId} 上传图片`)}
                     onApprove={(id) => void reviewPost(id, "approve")}
@@ -1224,6 +1230,7 @@ export function PostsPage({
         open={Boolean(detailPostId)}
         canDirectRecall={isAdmin}
         recallBusy={detailPost ? busyPostId === detailPost.id : false}
+        publishMode={publishMode}
         onOpenChange={(open) => {
           if (!open) {
             closePostDetail();
@@ -1424,6 +1431,7 @@ function PostDetailDialog({
   open,
   canDirectRecall = false,
   recallBusy = false,
+  publishMode = "single",
   onOpenChange,
   onPreview,
   onImagePreview,
@@ -1434,6 +1442,7 @@ function PostDetailDialog({
   open: boolean;
   canDirectRecall?: boolean;
   recallBusy?: boolean;
+  publishMode?: "single" | "accumulate";
   onOpenChange: (open: boolean) => void;
   onPreview: (post: ReviewPostItem) => void;
   onImagePreview: (post: ReviewPostItem, images: PostImage[], index: number) => void;
@@ -1457,6 +1466,9 @@ function PostDetailDialog({
               <Badge variant="outline">#{post.displayId}</Badge>
               <Badge variant="secondary">{post.status === "publishing" && post.batch?.collecting ? waitingBatchLabel : statusLabels[post.status] ?? post.status}</Badge>
               {post.anonymous ? <Badge variant="outline">匿名展示</Badge> : <Badge variant="outline">实名展示</Badge>}
+              {publishMode === "accumulate" || post.publishImmediately ? (
+                <Badge variant="outline">{post.publishImmediately ? "单发" : "批量"}</Badge>
+              ) : null}
               <Badge variant="outline">{images.length} 张图片</Badge>
             </div>
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
@@ -1557,6 +1569,7 @@ function ReviewList({
   posts,
   busyPostId,
   isAdmin,
+  publishMode = "single",
   emptyTitle = "当前筛选下没有稿件",
   onPreview,
   onImagePreview,
@@ -1571,6 +1584,7 @@ function ReviewList({
   posts: ReviewPostItem[];
   busyPostId: string;
   isAdmin: boolean;
+  publishMode?: "single" | "accumulate";
   emptyTitle?: string;
   onPreview: (post: ReviewPostItem) => void;
   onImagePreview: (post: ReviewPostItem, images: PostImage[], index: number) => void;
@@ -1595,6 +1609,7 @@ function ReviewList({
           palette={postCardPalettes[index % postCardPalettes.length] ?? defaultPostCardPalette}
           busy={busyPostId === post.id}
           canDirectRecall={isAdmin}
+          publishMode={publishMode}
           onPreview={() => onPreview(post)}
           onImagePreview={(images, imageIndex) => onImagePreview(post, images, imageIndex)}
           onApprove={() => onApprove(post.id)}
@@ -1614,6 +1629,7 @@ function PendingRecallQueue({
   posts,
   loading,
   busyPostId,
+  publishMode = "single",
   onPreview,
   onImagePreview,
   onRecallApprove,
@@ -1624,6 +1640,7 @@ function PendingRecallQueue({
   posts: ReviewPostItem[];
   loading: boolean;
   busyPostId: string;
+  publishMode?: "single" | "accumulate";
   onPreview: (post: ReviewPostItem) => void;
   onImagePreview: (post: ReviewPostItem, images: PostImage[], index: number) => void;
   onRecallApprove: (post: ReviewPostItem) => void;
@@ -1659,6 +1676,7 @@ function PendingRecallQueue({
             post={post}
             palette={postCardPalettes[index % postCardPalettes.length] ?? defaultPostCardPalette}
             busy={busyPostId === post.id}
+            publishMode={publishMode}
             onPreview={() => onPreview(post)}
             onImagePreview={(images, imageIndex) => onImagePreview(post, images, imageIndex)}
             onApprove={() => undefined}
@@ -1679,6 +1697,7 @@ function ReviewCard({
   palette,
   busy,
   canDirectRecall = false,
+  publishMode = "single",
   onPreview,
   onImagePreview,
   onApprove,
@@ -1694,6 +1713,7 @@ function ReviewCard({
   palette: string;
   busy: boolean;
   canDirectRecall?: boolean;
+  publishMode?: "single" | "accumulate";
   onPreview: () => void;
   onImagePreview: (images: PostImage[], index: number) => void;
   onApprove: () => void;
@@ -1726,6 +1746,8 @@ function ReviewCard({
           status={post.status}
           statusClassName={statusClassName}
           submissionChannel={post.submissionChannel}
+          publishImmediately={Boolean(post.publishImmediately)}
+          publishMode={publishMode}
           batch={post.batch}
           actions={
             <div className="flex flex-wrap gap-2">
@@ -1805,6 +1827,7 @@ function PostList({
   busyCancelPostId,
   busyRecallPostId,
   busyFollowPostId,
+  publishMode = "single",
   onPreview,
   onImagePreview,
   onCancel,
@@ -1815,6 +1838,7 @@ function PostList({
   busyCancelPostId: string;
   busyRecallPostId: string;
   busyFollowPostId: string;
+  publishMode?: "single" | "accumulate";
   onPreview: (post: PostItem) => void;
   onImagePreview: (post: PostItem, images: PostImage[], index: number) => void;
   onCancel: (post: PostItem) => void;
@@ -1835,6 +1859,7 @@ function PostList({
           cancelBusy={busyCancelPostId === post.id}
           recallBusy={busyRecallPostId === post.id}
           followBusy={busyFollowPostId === post.id}
+          publishMode={publishMode}
           onPreview={() => onPreview(post)}
           onImagePreview={(images, imageIndex) => onImagePreview(post, images, imageIndex)}
           onCancel={() => onCancel(post)}
@@ -1852,6 +1877,7 @@ function PostCard({
   cancelBusy,
   recallBusy,
   followBusy,
+  publishMode = "single",
   onPreview,
   onImagePreview,
   onCancel,
@@ -1863,6 +1889,7 @@ function PostCard({
   cancelBusy: boolean;
   recallBusy: boolean;
   followBusy: boolean;
+  publishMode?: "single" | "accumulate";
   onPreview: () => void;
   onImagePreview: (images: PostImage[], index: number) => void;
   onCancel: () => void;
@@ -1888,6 +1915,8 @@ function PostCard({
           status={post.status}
           statusClassName={statusClassName}
           submissionChannel={post.submissionChannel}
+          publishImmediately={Boolean(post.publishImmediately)}
+          publishMode={publishMode}
           batch={post.batch}
           title={post.title || "未命名稿件"}
           actions={
@@ -1936,6 +1965,8 @@ function PostMetaHeader({
   status,
   statusClassName,
   submissionChannel,
+  publishImmediately,
+  publishMode,
   batch,
   title,
   actions,
@@ -1947,6 +1978,8 @@ function PostMetaHeader({
   status: string;
   statusClassName: string;
   submissionChannel?: "web" | "private";
+  publishImmediately?: boolean;
+  publishMode?: "single" | "accumulate";
   batch?: { postCount: number; otherDisplayIds: number[]; collecting?: boolean } | null | undefined;
   title?: string;
   actions?: ReactNode;
@@ -1955,6 +1988,8 @@ function PostMetaHeader({
   // 这样两个调用方传入的 statusClassName 不一致时也能自洽。
   const displayStatus = status === "publishing" && batch?.collecting ? WAITING_BATCH_STATUS : status;
   const effectiveStatusClassName = displayStatus === WAITING_BATCH_STATUS ? statusStyles[WAITING_BATCH_STATUS] ?? statusClassName : statusClassName;
+  const showPublishModeBadge = publishMode === "accumulate" || publishImmediately === true;
+  const isSinglePublish = publishImmediately === true || publishMode === "single";
   return (
     <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-start md:gap-3">
       <div className="min-w-0">
@@ -1964,6 +1999,16 @@ function PostMetaHeader({
           {submissionChannel ? (
             <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-semibold leading-4 ${submissionChannelLabels[submissionChannel]?.className ?? "bg-slate-100 text-slate-600"}`}>
               {submissionChannelLabels[submissionChannel]?.label ?? submissionChannel}
+            </span>
+          ) : null}
+          {showPublishModeBadge ? (
+            <span
+              className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-semibold leading-4 ${
+                isSinglePublish ? "bg-emerald-100 text-emerald-700" : "bg-violet-100 text-violet-700"
+              }`}
+              title={isSinglePublish ? "审核通过后立即单独发布" : "审核通过后进入批量等待合并发布"}
+            >
+              {isSinglePublish ? "单发" : "批量"}
             </span>
           ) : null}
           {batch && batch.postCount > 1 ? (
