@@ -2,8 +2,9 @@ FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    OMP_NUM_THREADS=2 \
-    MKL_NUM_THREADS=2 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     PADDLE_PDX_MODEL_SOURCE=BOS
 
 WORKDIR /app
@@ -19,7 +20,7 @@ COPY apps/ocr/app.py ./app.py
 
 # Download the lightweight Chinese PP-OCRv4 models during image build so the
 # production container never waits for external model downloads at startup.
-RUN python -c "from app import create_ocr; create_ocr()"
+RUN python -c "from app import create_ocr, warm_up_ocr; model = create_ocr(); warm_up_ocr(model)"
 
 EXPOSE 9001
 

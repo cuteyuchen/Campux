@@ -205,17 +205,27 @@ main() {
   require_file "$COMPOSE_FILE"
   load_env
 
-  exec 9>"$LOCK_FILE"
-  flock -n 9 || die "another container deployment is already running"
+  if [[ "${CAMPUX_UPDATE_LOCKED:-0}" != "1" ]]; then
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "another container deployment is already running"
+    export CAMPUX_UPDATE_LOCKED=1
+  fi
 
   docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 \
     || die "Docker network not found: $DOCKER_NETWORK"
   [[ "$(docker container inspect "$PG_CONTAINER" --format '{{.State.Running}}' 2>/dev/null || true)" = "true" ]] \
     || die "PostgreSQL container is not running: $PG_CONTAINER"
 
+  script_before_pull="$(git -C "$REPOSITORY_DIR" rev-parse HEAD):$(sha256sum "$0" | cut -d' ' -f1)"
   git -C "$REPOSITORY_DIR" fetch origin main
   git -C "$REPOSITORY_DIR" checkout main
   git -C "$REPOSITORY_DIR" pull --ff-only origin main
+  script_after_pull="$(git -C "$REPOSITORY_DIR" rev-parse HEAD):$(sha256sum "$REPOSITORY_DIR/deploy/server/update.sh" | cut -d' ' -f1)"
+  if [[ "$script_before_pull" != "$script_after_pull" && "${CAMPUX_UPDATE_REEXECUTED:-0}" != "1" ]]; then
+    log "repository or deployment script changed; restarting with the updated script"
+    export CAMPUX_UPDATE_REEXECUTED=1
+    exec "$REPOSITORY_DIR/deploy/server/update.sh"
+  fi
   target_sha="$(git -C "$REPOSITORY_DIR" rev-parse HEAD)"
   CAMPUX_IMAGE="$IMAGE_REPOSITORY:sha-$target_sha"
   CAMPUX_OCR_IMAGE="$OCR_IMAGE_REPOSITORY:sha-$target_sha"

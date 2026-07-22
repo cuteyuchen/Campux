@@ -26,10 +26,21 @@ def create_ocr() -> PaddleOCR:
     return PaddleOCR(
         lang="ch",
         ocr_version="PP-OCRv4",
+        # Paddle 3.3's oneDNN executor cannot run the PP-OCRv4 detection
+        # graph on every x86 CPU. Keep the portable CPU executor so a
+        # successful health check also means inference can actually run.
+        enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
     )
+
+
+def warm_up_ocr(model: PaddleOCR) -> None:
+    # Force the inference executor to initialize before /health can report
+    # healthy. Model construction alone does not exercise Paddle's CPU graph.
+    blank_image = np.full((64, 128, 3), 255, dtype=np.uint8)
+    list(model.predict(blank_image))
 
 
 def collect_recognized_text(payload: Any) -> list[str]:
@@ -65,7 +76,9 @@ def decode_first_image_frame(raw: bytes) -> np.ndarray:
 @app.on_event("startup")
 def load_ocr_model() -> None:
     global ocr
-    ocr = create_ocr()
+    candidate = create_ocr()
+    warm_up_ocr(candidate)
+    ocr = candidate
     logger.info("PaddleOCR model loaded")
 
 
