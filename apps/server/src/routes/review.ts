@@ -398,6 +398,59 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
     }
   });
 
+  app.post("/api/review/posts/:id/recall/manual-complete", async (request, reply) => {
+    const context = await requireReadyTenant(request, reply, "admin");
+    const params = postParamsSchema.parse(request.params);
+    const post = await prisma.post.findFirst({
+      where: { id: params.id, tenantId: context.selectedTenant.id },
+      include: {
+        batchItem: {
+          include: { batch: { select: { _count: { select: { items: true } } } } },
+        },
+      },
+    });
+
+    if (!post) {
+      return reply.code(404).send({ message: "稿件不存在" });
+    }
+    if (post.status !== "pending_recall") {
+      return reply.code(409).send({ message: "只有待撤回稿件可以标记为已手动撤回" });
+    }
+    if ((post.batchItem?.batch._count.items ?? 0) <= 1) {
+      return reply.code(409).send({ message: "单条发布请使用系统撤回" });
+    }
+
+    const updated = await prisma.post.update({
+      where: { id: post.id },
+      data: {
+        status: "recalled",
+        recallIgnored: false,
+        recallIgnoredAt: null,
+        logs: {
+          create: {
+            tenantId: context.selectedTenant.id,
+            actorId: context.user.id,
+            oldStatus: post.status,
+            newStatus: "recalled",
+            comment: "管理员已手动撤回批量发布内容",
+          },
+        },
+      },
+    });
+    await writeAuditLog({
+      tenantId: context.selectedTenant.id,
+      actorId: context.user.id,
+      action: "post.recall.manual_complete",
+      targetType: "post",
+      targetId: post.id,
+      detail: { displayId: post.displayId, batchPostCount: post.batchItem?.batch._count.items ?? 0 },
+    });
+    oneBot?.notifyPostRecalled(updated.id, 0, { manuallyRecalled: true }).catch((error) => {
+      app.log.warn({ error, postId: updated.id }, "failed to notify manually recalled post");
+    });
+    return { ok: true };
+  });
+
   app.post("/api/review/posts/:id/recall/reject", async (request, reply) => {
     const context = await requireReadyTenant(request, reply, "reviewer");
     const params = postParamsSchema.parse(request.params);

@@ -71,6 +71,7 @@ import {
   formatRegisterAlready,
   formatFirstPrivateMessageRegistrationNotice,
   formatPrivatePostAutoRegistrationNotice,
+  appendPrivateAutoReply,
   formatPrivatePostHistory,
   formatPrivatePostWithdrawPrompt,
   formatPrivatePostStatus,
@@ -456,7 +457,7 @@ export class OneBotRuntime {
     await this.sendTenantReviewNotification(post.tenantId, message);
   }
 
-  async notifyPostRecalled(postId: string, targetCount: number, opts?: { skipAuthor?: boolean }) {
+  async notifyPostRecalled(postId: string, targetCount: number, opts?: { skipAuthor?: boolean; manuallyRecalled?: boolean }) {
     const post = await prisma.post.findUnique({
       where: {
         id: postId,
@@ -469,8 +470,11 @@ export class OneBotRuntime {
       return;
     }
     const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, post.tenantId);
-    const groupSuffix = opts?.skipAuthor ? "\n（静默撤回，未通知作者）" : "";
-    await this.sendTenantReviewNotification(post.tenantId, formatPostRecalledGroup(post.displayId, targetCount, stylishEnabled) + groupSuffix);
+    const groupSuffix = [
+      opts?.manuallyRecalled ? "管理员已手动撤回批量发布内容" : "",
+      opts?.skipAuthor ? "静默撤回，未通知作者" : "",
+    ].filter(Boolean).map((message) => `（${message}）`).join("\n");
+    await this.sendTenantReviewNotification(post.tenantId, formatPostRecalledGroup(post.displayId, targetCount, stylishEnabled) + (groupSuffix ? `\n${groupSuffix}` : ""));
 
     if (opts?.skipAuthor) {
       return;
@@ -1256,8 +1260,10 @@ export class OneBotRuntime {
           }
           const loginUrl = await this.resolveCampuxLoginUrl(bot.tenantId);
           const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
-          const message = formatFirstPrivateMessageRegistrationNotice(execution.result, loginUrl, stylishEnabled)
-            ?? formatRegisterAlready(loginUrl, stylishEnabled);
+          const registrationNotice = formatFirstPrivateMessageRegistrationNotice(execution.result, loginUrl, stylishEnabled);
+          const message = registrationNotice
+            ? appendPrivateAutoReply(registrationNotice, formatConfiguredPrivateHelp(bot.userMessageReply, stylishEnabled)) ?? registrationNotice
+            : formatRegisterAlready(loginUrl, stylishEnabled);
           await this.sendPrivateMessage(botQqUin, userQqUin, message);
           return;
         }
@@ -1715,7 +1721,7 @@ export class OneBotRuntime {
     userQqUin,
     event,
   }: {
-    bot: { tenantId: string };
+    bot: { tenantId: string; userMessageReply: string | null };
     botQqUin: string;
     userQqUin: string;
     event: OneBotMessageEvent;
@@ -1725,7 +1731,11 @@ export class OneBotRuntime {
       return null;
     }
     const loginUrl = await this.resolveCampuxLoginUrl(bot.tenantId);
-    return formatPrivatePostAutoRegistrationNotice(execution.result, loginUrl);
+    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
+    return appendPrivateAutoReply(
+      formatPrivatePostAutoRegistrationNotice(execution.result, loginUrl),
+      formatConfiguredPrivateHelp(bot.userMessageReply, stylishEnabled),
+    );
   }
 
   private async sendPrivatePostHistory(
@@ -1854,14 +1864,6 @@ export class OneBotRuntime {
     if (post.status !== "published") {
       await this.sendPrivateMessage(botQqUin, userQqUin, `稿件 #${displayId} 当前状态为“${formatPrivatePostStatus(post.status)}”，暂不支持撤回。`);
       return;
-    }
-
-    const batchItem = await prisma.publishBatchItem.findUnique({
-      where: { postId: post.id },
-      select: { id: true },
-    });
-    if (batchItem) {
-      throw new BotWorkflowError("批量发布的稿件不支持程序撤回，请联系管理员手动到 QQ 空间删除对应说说", 409);
     }
 
     const recallReason = normalizedReason || "用户通过机器人申请撤回";
@@ -2476,7 +2478,7 @@ export class OneBotRuntime {
     pendingConfirm,
     draft,
   }: {
-    bot: { tenantId: string };
+    bot: { tenantId: string; userMessageReply: string | null };
     botQqUin: string;
     userQqUin: string;
     pendingPublishMode?: PrivatePostPendingPublishMode | undefined;

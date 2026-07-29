@@ -1772,13 +1772,6 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
     if (post.status !== "published") {
       return reply.code(409).send({ message: "只有已发表稿件可以申请撤回" });
     }
-    const batchItem = await prisma.publishBatchItem.findUnique({
-      where: { postId: post.id },
-      select: { id: true },
-    });
-    if (batchItem) {
-      return reply.code(409).send({ message: "批量发布的稿件不支持程序撤回，请联系管理员手动到 QQ 空间删除对应说说" });
-    }
     const body = recallRequestSchema.parse(request.body ?? {});
     const reason = body.reason.trim();
 

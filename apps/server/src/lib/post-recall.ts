@@ -44,9 +44,9 @@ export async function executePostRecall({
 }) {
   const batchItem = await prisma.publishBatchItem.findUnique({
     where: { postId },
-    select: { id: true },
+    select: { batch: { select: { _count: { select: { items: true } } } } },
   });
-  if (batchItem) {
+  if ((batchItem?.batch._count.items ?? 0) > 1) {
     throw new PostRecallNotSupportedError("批量发布的稿件不支持程序撤回，请手动到 QQ 空间删除对应说说");
   }
 

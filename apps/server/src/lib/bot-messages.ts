@@ -281,6 +281,12 @@ export function formatPrivatePostAutoRegistrationNotice(
   return `登录密码沿用原账号。\n也可以登录网站投稿：${loginUrl}`;
 }
 
+export function appendPrivateAutoReply(notice: string | null, reply: string): string | null {
+  if (!notice) return null;
+  const configuredReply = reply.trim();
+  return configuredReply ? `${notice}\n\n${configuredReply}` : notice;
+}
+
 export function formatPrivatePostPublishModePrompt(stylishEnabled = false): string {
   if (!stylishEnabled) return privatePostPublishModeDefault;
   return pick(privatePostPublishModeStylish);

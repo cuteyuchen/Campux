@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { buildReviewQueueReminderMessages } from "../runtime/review-queue";
 import {
   formatFirstPrivateMessageRegistrationNotice,
+  appendPrivateAutoReply,
   formatConfiguredPrivateHelp,
   formatPrivateCommandHelp,
   formatPrivateHelp,
@@ -107,6 +108,12 @@ describe("bot registration messages", () => {
     expect(message).not.toContain("检测到当前账号未注册");
     expect(message).not.toContain("当前对话投稿流程已开始");
     expect(formatPrivatePostAutoRegistrationNotice({ password: null, alreadyHadTenantAccess: true }, loginUrl)).toBeNull();
+  });
+
+  test("auto-registration notice preserves the configured automatic reply", () => {
+    const notice = formatPrivatePostAutoRegistrationNotice({ password: "InitPass9", alreadyHadTenantAccess: false }, loginUrl);
+    expect(appendPrivateAutoReply(notice, "自定义自动回复")).toContain("初始密码：InitPass9");
+    expect(appendPrivateAutoReply(notice, "自定义自动回复")).toContain("自定义自动回复");
   });
 
   test("legacy first-private auto-registration copy is replaced by the current help", () => {

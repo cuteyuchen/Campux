@@ -626,6 +626,19 @@ export function PostsPage({
     }
   }
 
+  async function completeManualRecallPost(post: ReviewPostItem) {
+    setBusyPostId(post.id);
+    try {
+      await api(`/api/review/posts/${post.id}/recall/manual-complete`, { method: "POST" });
+      toast.success("已标记为手动撤回，并已通知作者。");
+      await refreshAll();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "标记手动撤回失败");
+    } finally {
+      setBusyPostId("");
+    }
+  }
+
   async function rejectRecallPost(post: ReviewPostItem) {
     setBusyPostId(post.id);
     try {
@@ -1117,6 +1130,7 @@ export function PostsPage({
                 onPreview={(post) => void openRenderPreview(post)}
                 onImagePreview={(post, images, index) => openImagePreview(images, index, `稿件 ${post.displayId} 上传图片`)}
                 onRecallApprove={(post) => setRecallConfirm({ open: true, mode: "approve", post })}
+                onRecallManualComplete={isAdmin ? (post) => void completeManualRecallPost(post) : undefined}
                 onRecallReject={(post) => setRecallConfirm({ open: true, mode: "reject", post })}
                 onRecallIgnore={(post) => void ignoreRecallPost(post)}
                 onDetail={(post) => openPostDetail(post.id)}
@@ -1135,6 +1149,7 @@ export function PostsPage({
                     onApprove={(id) => void reviewPost(id, "approve")}
                     onReject={(post) => setRejectDialog({ open: true, postId: post.id, displayId: post.displayId, reason: "" })}
                     onRecallApprove={(post) => setRecallConfirm({ open: true, mode: "approve", post })}
+                    onRecallManualComplete={isAdmin ? (post) => void completeManualRecallPost(post) : undefined}
                     onRecallReject={(post) => setRecallConfirm({ open: true, mode: "reject", post })}
                     onRecallDirect={(post) => setRecallConfirm({ open: true, mode: "admin", post })}
                     onRecallDirectSilent={(post) => setRecallConfirm({ open: true, mode: "admin-silent", post })}
@@ -1576,6 +1591,7 @@ function ReviewList({
   onApprove,
   onReject,
   onRecallApprove,
+  onRecallManualComplete,
   onRecallReject,
   onRecallDirect,
   onRecallDirectSilent,
@@ -1591,6 +1607,7 @@ function ReviewList({
   onApprove: (id: string) => void;
   onReject: (post: ReviewPostItem) => void;
   onRecallApprove: (post: ReviewPostItem) => void;
+  onRecallManualComplete?: ((post: ReviewPostItem) => void) | undefined;
   onRecallReject: (post: ReviewPostItem) => void;
   onRecallDirect: (post: ReviewPostItem) => void;
   onRecallDirectSilent: (post: ReviewPostItem) => void;
@@ -1615,6 +1632,7 @@ function ReviewList({
           onApprove={() => onApprove(post.id)}
           onReject={() => onReject(post)}
           onRecallApprove={() => onRecallApprove(post)}
+          onRecallManualComplete={onRecallManualComplete ? () => onRecallManualComplete(post) : undefined}
           onRecallReject={() => onRecallReject(post)}
           onRecallDirect={() => onRecallDirect(post)}
           onRecallDirectSilent={() => onRecallDirectSilent(post)}
@@ -1633,6 +1651,7 @@ function PendingRecallQueue({
   onPreview,
   onImagePreview,
   onRecallApprove,
+  onRecallManualComplete,
   onRecallReject,
   onRecallIgnore,
   onDetail,
@@ -1644,6 +1663,7 @@ function PendingRecallQueue({
   onPreview: (post: ReviewPostItem) => void;
   onImagePreview: (post: ReviewPostItem, images: PostImage[], index: number) => void;
   onRecallApprove: (post: ReviewPostItem) => void;
+  onRecallManualComplete?: ((post: ReviewPostItem) => void) | undefined;
   onRecallReject: (post: ReviewPostItem) => void;
   onRecallIgnore: (post: ReviewPostItem) => void;
   onDetail: (post: ReviewPostItem) => void;
@@ -1682,6 +1702,7 @@ function PendingRecallQueue({
             onApprove={() => undefined}
             onReject={() => undefined}
             onRecallApprove={() => onRecallApprove(post)}
+            onRecallManualComplete={onRecallManualComplete ? () => onRecallManualComplete(post) : undefined}
             onRecallReject={() => onRecallReject(post)}
             onRecallIgnore={() => onRecallIgnore(post)}
             onDetail={() => onDetail(post)}
@@ -1703,6 +1724,7 @@ function ReviewCard({
   onApprove,
   onReject,
   onRecallApprove,
+  onRecallManualComplete,
   onRecallReject,
   onRecallIgnore,
   onRecallDirect,
@@ -1719,6 +1741,7 @@ function ReviewCard({
   onApprove: () => void;
   onReject: () => void;
   onRecallApprove: () => void;
+  onRecallManualComplete?: (() => void) | undefined;
   onRecallReject: () => void;
   onRecallIgnore?: () => void;
   onRecallDirect?: () => void;
@@ -1731,6 +1754,7 @@ function ReviewCard({
   const statusClassName = statusStyles[post.status] ?? "bg-white text-slate-600";
   const canReviewPost = post.status === "pending_approval";
   const canApproveRecall = post.status === "pending_recall";
+  const requiresManualRecall = canApproveRecall && (post.batch?.postCount ?? 0) > 1;
   const canDirectRecallPost = canDirectRecall && post.status === "published" && Boolean(onRecallDirect);
   const cardBg = postCardBgStyle(post.bgColor);
   const cardTextColor = postCardTextColor(post.textColor);
@@ -1797,10 +1821,17 @@ function ReviewCard({
                   忽略
                 </Button>
               ) : null}
-              <Button size="sm" className="font-medium" disabled={busy} onClick={onRecallApprove}>
-                <RotateCcwIcon data-icon="inline-start" />
-                同意撤回
-              </Button>
+              {requiresManualRecall && onRecallManualComplete ? (
+                <Button size="sm" className="font-medium" disabled={busy} onClick={onRecallManualComplete}>
+                  <RotateCcwIcon data-icon="inline-start" />
+                  已手动撤回
+                </Button>
+              ) : !requiresManualRecall ? (
+                <Button size="sm" className="font-medium" disabled={busy} onClick={onRecallApprove}>
+                  <RotateCcwIcon data-icon="inline-start" />
+                  同意撤回
+                </Button>
+              ) : null}
             </div>
           ) : canDirectRecallPost ? (
             <div className="flex flex-wrap gap-2">
