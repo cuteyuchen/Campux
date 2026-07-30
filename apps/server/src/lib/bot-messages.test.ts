@@ -101,10 +101,10 @@ describe("bot registration messages", () => {
       .toBeNull();
   });
 
-  test("posting auto-registration notice only appends password and website login guidance", () => {
+  test("posting auto-registration notice only appends password", () => {
     const message = formatPrivatePostAutoRegistrationNotice({ password: "InitPass9", alreadyHadTenantAccess: false }, loginUrl);
     expect(message).toContain("初始密码：InitPass9");
-    expect(message).toContain(`也可以登录网站投稿：${loginUrl}`);
+    expect(message).not.toContain("登录网站投稿");
     expect(message).not.toContain("检测到当前账号未注册");
     expect(message).not.toContain("当前对话投稿流程已开始");
     expect(formatPrivatePostAutoRegistrationNotice({ password: null, alreadyHadTenantAccess: true }, loginUrl)).toBeNull();

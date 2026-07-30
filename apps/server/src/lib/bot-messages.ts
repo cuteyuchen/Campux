@@ -272,13 +272,13 @@ export function formatFirstPrivateMessageRegistrationNotice(
 
 export function formatPrivatePostAutoRegistrationNotice(
   result: { password: string | null; alreadyHadTenantAccess: boolean },
-  loginUrl: string,
+  _loginUrl: string,
 ): string | null {
   if (result.alreadyHadTenantAccess) return null;
   if (result.password) {
-    return `初始密码：${result.password}\n也可以登录网站投稿：${loginUrl}`;
+    return `初始密码：${result.password}`;
   }
-  return `登录密码沿用原账号。\n也可以登录网站投稿：${loginUrl}`;
+  return "登录密码沿用原账号。";
 }
 
 export function appendPrivateAutoReply(notice: string | null, reply: string): string | null {
