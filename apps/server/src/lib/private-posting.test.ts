@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractOneBotImageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText } from "./private-posting";
+import { countOneBotPostableImages, extractOneBotImageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateMessage } from "./private-posting";
 
 describe("private posting command parsing", () => {
   test("parses English hash start command", () => {
@@ -130,8 +130,10 @@ describe("private posting command parsing", () => {
     expect(resolvePrivatePostSubmissionText("\u200b", 0)).toBe("");
     expect(resolvePrivatePostSubmissionText("  ", 0)).toBe("");
     expect(resolvePrivatePostSubmissionText("正文", 2)).toBe("正文");
-    expect(shouldAutoRegisterPrivateText("你好")).toBe(true);
-    expect(shouldAutoRegisterPrivateText("  ")).toBe(false);
+    expect(shouldAutoRegisterPrivateMessage("你好")).toBe(true);
+    expect(shouldAutoRegisterPrivateMessage("  ")).toBe(false);
+    expect(shouldAutoRegisterPrivateMessage("", 1)).toBe(true);
+    expect(shouldAutoRegisterPrivateMessage("  ", 0)).toBe(false);
   });
 
   test("parses history and withdrawal management commands without requiring a prefix", () => {
@@ -167,5 +169,16 @@ describe("onebot message helpers", () => {
         { type: "image", data: { url: "https://example.com/a.png" } },
       ]),
     ).toHaveLength(2);
+  });
+
+  test("counts postable images and ignores sticker-only images", () => {
+    expect(countOneBotPostableImages([
+      { type: "text", data: { text: "hello" } },
+      { type: "image", data: { file: "photo.jpg" } },
+      { type: "image", data: { file: "sticker.gif", sub_type: 1 } },
+    ])).toBe(1);
+    expect(countOneBotPostableImages([
+      { type: "image", data: { file: "sticker.gif", sub_type: "1" } },
+    ])).toBe(0);
   });
 });

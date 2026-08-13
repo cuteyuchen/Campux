@@ -130,8 +130,12 @@ export function resolvePrivatePostSubmissionText(text: string, attachmentCount: 
   return stripZeroWidthChars(normalized).trim() ? normalized : attachmentCount > 0 ? "投稿" : "";
 }
 
-export function shouldAutoRegisterPrivateText(text: string) {
-  return stripZeroWidthChars(text).trim().length > 0;
+export function countOneBotPostableImages(message: unknown) {
+  return extractOneBotImageSegments(message).filter((segment) => String(segment.data?.sub_type ?? "") !== "1").length;
+}
+
+export function shouldAutoRegisterPrivateMessage(text: string, imageCount = 0) {
+  return stripZeroWidthChars(text).trim().length > 0 || imageCount > 0;
 }
 
 export type PrivatePostManagementCommand =

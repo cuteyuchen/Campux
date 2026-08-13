@@ -154,11 +154,19 @@ export function LoginScreen({
           <>
             <form className="product-surface px-4 py-5" onSubmit={handleSubmit}>
               <p className="text-lg font-semibold text-slate-950">登录到 {title}</p>
-              <p className="mt-2 text-sm leading-6 text-slate-600">输入 QQ 号或邮箱，以及你的账号密码。</p>
+              {managementHost ? (
+                <p className="mt-2 text-sm leading-6 text-slate-600">输入 QQ 号或邮箱，以及你的账号密码。</p>
+              ) : (
+                <div className="product-accent-amber mt-3 rounded-md border px-3 py-2 text-sm leading-6">
+                  <p>账号是你的 <span className="font-semibold">QQ 号</span>。</p>
+                  <p>密码<span className="font-semibold">不是 QQ 密码</span>，而是机器人回复给你的密码。</p>
+                  <p className="text-xs opacity-80">忘记密码请去机器人发送“重置密码”。</p>
+                </div>
+              )}
               <div className="mt-5 grid gap-3">
-                <Input value={account} name="username" autoComplete="username" placeholder="QQ 号 / 邮箱" onChange={(event) => handleAccountChange(event.target.value)} />
+                <Input value={account} name="username" autoComplete="username" placeholder={managementHost ? "QQ 号 / 邮箱" : "QQ 号"} onChange={(event) => handleAccountChange(event.target.value)} />
                 <div className="relative">
-                  <Input className="pr-10" value={password} name="password" autoComplete="current-password" type={passwordVisible ? "text" : "password"} placeholder="密码" onChange={(event) => handlePasswordChange(event.target.value)} />
+                  <Input className="pr-10" value={password} name="password" autoComplete="current-password" type={passwordVisible ? "text" : "password"} placeholder={managementHost ? "密码" : "机器人回复的密码，不是 QQ 密码"} onChange={(event) => handlePasswordChange(event.target.value)} />
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button

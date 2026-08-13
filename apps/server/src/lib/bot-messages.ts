@@ -199,10 +199,12 @@ export const publishWaitingResumeHint = "系统不会继续发布这条稿件，
 const formatPostingEntryGuidance = (loginUrl: string) => [
   "发送“投稿”开始对话投稿。",
   `也可以登录网站投稿：${loginUrl}`,
+  "网页登录账号是你的 QQ 号，密码是机器人回复的密码，不是 QQ 密码。忘记密码请向机器人发送“重置密码”。",
 ].join("\n");
 
 const registerSuccessDefault = (password: string, loginUrl: string) => [
   "检测到当前账号未注册，已自动注册。",
+  "账号是你的 QQ 号。",
   `初始密码：${password}`,
   "",
   formatPostingEntryGuidance(loginUrl),
@@ -211,12 +213,14 @@ const registerSuccessDefault = (password: string, loginUrl: string) => [
 const registerSuccessStylish = [
   (password: string, loginUrl: string) => [
     "🎉 检测到当前账号未注册，已自动注册。",
+    "账号是你的 QQ 号。",
     `初始密码：${password}`,
     "",
     formatPostingEntryGuidance(loginUrl),
   ].join("\n"),
   (password: string, loginUrl: string) => [
     "✅ 检测到当前账号未注册，已自动注册。",
+    "账号是你的 QQ 号。",
     `初始密码：${password}`,
     "",
     formatPostingEntryGuidance(loginUrl),
@@ -276,9 +280,9 @@ export function formatPrivatePostAutoRegistrationNotice(
 ): string | null {
   if (result.alreadyHadTenantAccess) return null;
   if (result.password) {
-    return `初始密码：${result.password}`;
+    return `账号是你的 QQ 号，初始密码：${result.password}`;
   }
-  return "登录密码沿用原账号。";
+  return "登录密码沿用原账号。网页登录账号是你的 QQ 号。";
 }
 
 export function appendPrivateAutoReply(notice: string | null, reply: string): string | null {
@@ -790,7 +794,8 @@ export function formatPrivatePostCancelled(stylishEnabled = false): string {
 
 const privateHelpDefault = [
   "发送“投稿”开始对话投稿。",
-  "网站投稿：https://xxyg.cuteyuchen.top",
+  "也可以登录网站投稿：https://xxyg.cuteyuchen.top",
+  "网页登录账号是你的 QQ 号，密码是机器人回复的密码，不是 QQ 密码。忘记密码请向机器人发送“重置密码”。",
   "发送“指令”查看全部功能。",
 ].join("\n");
 
@@ -813,7 +818,8 @@ const privateCommandHelpDefault = [
   "重置密码：重置登录密码",
   "",
   "投稿过程中：匿名、实名、撤回上一条、结束、确认、取消",
-  "网站投稿：https://xxyg.cuteyuchen.top",
+  "也可以登录网站投稿：https://xxyg.cuteyuchen.top",
+  "网页登录账号是你的 QQ 号，密码是机器人回复的密码，不是 QQ 密码。忘记密码请向机器人发送“重置密码”。",
 ].join("\n");
 
 export function formatPrivateCommandHelp(stylishEnabled = false): string {
@@ -822,6 +828,11 @@ export function formatPrivateCommandHelp(stylishEnabled = false): string {
 
 const legacyPrivateAutoRegistrationReply = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
 const compactPrivateHelpReply = "发送“投稿”开始对话投稿。\n也可以登录网站投稿：https://xxyg.cuteyuchen.top";
+const websiteFirstPrivateHelpReply = [
+  "发送“投稿”开始对话投稿。",
+  "网站投稿：https://xxyg.cuteyuchen.top",
+  "发送“指令”查看全部功能。",
+].join("\n");
 const verbosePrivateHelpMarkers = [
   "西峡一高表白墙自助投稿助手",
   "首次发送任意文字会自动注册当前墙",
@@ -834,6 +845,7 @@ export function formatConfiguredPrivateHelp(configured: string | null | undefine
   if (!normalized
     || normalized === legacyPrivateAutoRegistrationReply
     || normalized === compactPrivateHelpReply
+    || normalized === websiteFirstPrivateHelpReply
     || verbosePrivateHelpMarkers.every((marker) => normalized.includes(marker))) {
     return formatPrivateHelp(stylishEnabled);
   }

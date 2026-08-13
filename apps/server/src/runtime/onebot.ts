@@ -24,7 +24,7 @@ import { findActiveBan, hasTenantRole } from "../lib/auth";
 import { buildCampuxLoginUrl } from "../lib/campux-login-url";
 import { prisma } from "../lib/prisma";
 import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedError } from "../lib/post-recall";
-import { extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateText, type OneBotMessageSegment } from "../lib/private-posting";
+import { countOneBotPostableImages, extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateMessage, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
 import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
 import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
@@ -1268,7 +1268,8 @@ export class OneBotRuntime {
           return;
         }
 
-        registrationNotice = shouldAutoRegisterPrivateText(plainText)
+        const postableImageCount = countOneBotPostableImages(event.message);
+        registrationNotice = shouldAutoRegisterPrivateMessage(plainText, postableImageCount)
           ? await this.ensurePrivatePostRegistration({ bot, botQqUin, userQqUin, event })
           : null;
 

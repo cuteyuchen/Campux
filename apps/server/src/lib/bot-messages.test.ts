@@ -36,7 +36,8 @@ const loginUrl = "https://wall.campux.top/login";
 function expectPostingEntryGuidance(message: string) {
   expect(message).toContain(loginUrl);
   expect(message).toContain("对话投稿");
-  expect(message).toContain("网站投稿");
+  expect(message).toContain("也可以登录网站投稿");
+  expect(message).toContain("账号是你的 QQ 号");
 }
 
 describe("bot registration messages", () => {
@@ -50,8 +51,10 @@ describe("bot registration messages", () => {
 
           expect(message).toContain("InitPass9");
           expect(message).toContain("已自动注册");
+          expect(message).toContain("账号是你的 QQ 号");
+          expect(message).toContain("不是 QQ 密码");
+          expect(message).toContain("重置密码");
           expectPostingEntryGuidance(message);
-          expect(message).not.toContain("重置密码");
         }
       }
     } finally {
@@ -78,8 +81,10 @@ describe("bot registration messages", () => {
           Math.random = () => randomValue;
           const message = formatPrivateHelp(stylishEnabled);
 
-          expect(message).toContain("xxyg.cuteyuchen.top");
           expect(message).toContain("发送“投稿”开始对话投稿");
+          expect(message).toContain("也可以登录网站投稿");
+          expect(message).toContain("xxyg.cuteyuchen.top");
+          expect(message).toContain("账号是你的 QQ 号");
           expect(message).toContain("发送“指令”查看全部功能");
           expect(message).not.toContain("稿件：");
           expect(message).not.toContain("撤回：");
@@ -103,7 +108,7 @@ describe("bot registration messages", () => {
 
   test("posting auto-registration notice only appends password", () => {
     const message = formatPrivatePostAutoRegistrationNotice({ password: "InitPass9", alreadyHadTenantAccess: false }, loginUrl);
-    expect(message).toContain("初始密码：InitPass9");
+    expect(message).toContain("账号是你的 QQ 号，初始密码：InitPass9");
     expect(message).not.toContain("登录网站投稿");
     expect(message).not.toContain("检测到当前账号未注册");
     expect(message).not.toContain("当前对话投稿流程已开始");
@@ -119,9 +124,11 @@ describe("bot registration messages", () => {
   test("legacy first-private auto-registration copy is replaced by the current help", () => {
     const legacy = "首次私聊会自动注册 Campux 账号。\n发送 #投稿 开始投稿。\n忘记密码时，请发送 #重置密码 获取新密码。";
     const compact = "发送“投稿”开始对话投稿。\n也可以登录网站投稿：https://xxyg.cuteyuchen.top";
+    const websiteFirst = "发送“投稿”开始对话投稿。\n网站投稿：https://xxyg.cuteyuchen.top\n发送“指令”查看全部功能。";
     const verbose = "西峡一高表白墙自助投稿助手\n首次发送任意文字会自动注册当前墙，机器人会回复初始密码。\n发送“稿件”或“历史投稿”可查看最近 5 条投稿及状态。\n如有系统使用问题，请联系 QQ 1249882361。";
     expect(formatConfiguredPrivateHelp(legacy, false)).toBe(formatPrivateHelp(false));
     expect(formatConfiguredPrivateHelp(compact, false)).toBe(formatPrivateHelp(false));
+    expect(formatConfiguredPrivateHelp(websiteFirst, false)).toBe(formatPrivateHelp(false));
     expect(formatConfiguredPrivateHelp(verbose, false)).toBe(formatPrivateHelp(false));
     expect(formatConfiguredPrivateHelp("自定义回复", false)).toBe("自定义回复");
   });
@@ -135,6 +142,7 @@ describe("bot registration messages", () => {
     expect(message).toContain("撤回+编号+理由");
     expect(message).toContain("重置密码：重置登录密码");
     expect(message).toContain("匿名、实名、撤回上一条、结束、确认、取消");
+    expect(message).toContain("网页登录账号是你的 QQ 号");
     expect(message).not.toContain("所有指令均不需要 #");
   });
 });
