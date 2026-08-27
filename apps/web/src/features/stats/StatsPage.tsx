@@ -36,6 +36,11 @@ const auditActionLabels: Record<string, string> = {
   "bot.qzone.cookies.auto_refresh": "自动刷新登录态",
   "bot.qzone.cookies.auto_refresh_failed": "自动刷新失败",
   "bot.qzone.cookies.qr_login": "扫码登录",
+  "bot.qzone.cookies.invalid": "空间登录态不可用",
+  "bot.qzone.cookies.recovered": "空间登录态恢复",
+  "bot.connection.offline": "Bot 连接离线",
+  "bot.connection.recovered": "Bot 连接恢复",
+  "bot.message.replay_failed": "离线消息补偿失败",
   "bot_account.create": "创建机器人",
   "bot_account.update": "更新机器人",
   "publish_target.create": "创建发布目标",
@@ -43,6 +48,7 @@ const auditActionLabels: Record<string, string> = {
   "publish_attempt.retry": "重试发布",
   "member.update_role": "修改成员身份",
   "ban.create": "封禁用户",
+  "ban.update": "更新封禁",
 };
 
 const timeRanges = [7, 14, 30, 90] as const;

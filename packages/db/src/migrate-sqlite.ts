@@ -19,6 +19,7 @@ import { mkdirSync } from "node:fs";
 const SQLITE_BASELINE_NAME = "0_sqlite_baseline";
 const FIRST_PRIVATE_MESSAGE_MIGRATION_NAME = "20260713120000_auto_register_on_first_private_message";
 const PUBLISH_IMMEDIATELY_MIGRATION_NAME = "20260722120000_add_post_publish_immediately";
+const BOT_HEALTH_INBOX_MIGRATION_NAME = "20260827120000_add_bot_health_and_message_inbox";
 const OLD_PRIVATE_MESSAGE_REPLY = `发送 #注册账号 可以用当前 QQ 注册本校园墙账号。
 发送 #重置密码 可以重置你的登录密码。`;
 const NEW_PRIVATE_MESSAGE_REPLY = `首次私聊会自动注册 Campux 账号。
@@ -214,6 +215,98 @@ function applyPublishImmediatelySqliteMigration(
   logger.info({ migration: PUBLISH_IMMEDIATELY_MIGRATION_NAME }, "sqlite incremental migration applied");
 }
 
+function applyBotHealthInboxSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const productTables = db
+    .query(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('Tenant', 'BotAccount')`,
+    )
+    .all() as Array<{ name: string }>;
+  // Small migration-unit fixtures and pre-Campux databases may not contain
+  // the product tables. Leave those databases untouched, as the other
+  // forward migrations do.
+  if (productTables.length < 2) return;
+
+  if (doneNames.has(BOT_HEALTH_INBOX_MIGRATION_NAME)) {
+    skipped.push(BOT_HEALTH_INBOX_MIGRATION_NAME);
+    return;
+  }
+
+  logger.info({ migration: BOT_HEALTH_INBOX_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS "BotHealthIncident" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "tenantId" TEXT NOT NULL,
+        "botAccountId" TEXT NOT NULL,
+        "kind" TEXT NOT NULL,
+        "startedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "resolvedAt" DATETIME,
+        "reason" TEXT NOT NULL,
+        "details" JSONB,
+        "faultNotifiedAt" DATETIME,
+        "recoveryNotifiedAt" DATETIME,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" DATETIME NOT NULL,
+        CONSTRAINT "BotHealthIncident_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT "BotHealthIncident_botAccountId_fkey" FOREIGN KEY ("botAccountId") REFERENCES "BotAccount" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS "BotMessageInbox" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "tenantId" TEXT NOT NULL,
+        "botAccountId" TEXT NOT NULL,
+        "eventKey" TEXT NOT NULL,
+        "rawEvent" JSONB NOT NULL,
+        "messageType" TEXT NOT NULL,
+        "conversationKey" TEXT NOT NULL,
+        "eventTime" DATETIME,
+        "receivedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "status" TEXT NOT NULL DEFAULT 'pending',
+        "attempts" INTEGER NOT NULL DEFAULT 0,
+        "availableAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "lockedAt" DATETIME,
+        "lastError" TEXT,
+        "processedAt" DATETIME,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" DATETIME NOT NULL,
+        CONSTRAINT "BotMessageInbox_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT "BotMessageInbox_botAccountId_fkey" FOREIGN KEY ("botAccountId") REFERENCES "BotAccount" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS "BotHealthIncident_tenantId_botAccountId_kind_resolvedAt_idx" ON "BotHealthIncident" ("tenantId", "botAccountId", "kind", "resolvedAt");
+      CREATE INDEX IF NOT EXISTS "BotHealthIncident_botAccountId_kind_startedAt_idx" ON "BotHealthIncident" ("botAccountId", "kind", "startedAt");
+      CREATE INDEX IF NOT EXISTS "BotMessageInbox_botAccountId_status_availableAt_idx" ON "BotMessageInbox" ("botAccountId", "status", "availableAt");
+      CREATE INDEX IF NOT EXISTS "BotMessageInbox_tenantId_status_availableAt_idx" ON "BotMessageInbox" ("tenantId", "status", "availableAt");
+      CREATE INDEX IF NOT EXISTS "BotMessageInbox_conversationKey_status_availableAt_idx" ON "BotMessageInbox" ("conversationKey", "status", "availableAt");
+      CREATE INDEX IF NOT EXISTS "BotMessageInbox_processedAt_idx" ON "BotMessageInbox" ("processedAt");
+      CREATE UNIQUE INDEX IF NOT EXISTS "BotMessageInbox_botAccountId_eventKey_key" ON "BotMessageInbox" ("botAccountId", "eventKey");
+    `);
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [randomUUID(), checksumOf(BOT_HEALTH_INBOX_MIGRATION_NAME), BOT_HEALTH_INBOX_MIGRATION_NAME],
+    );
+    const violations = db.query("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) {
+      throw new Error(`sqlite migration introduced ${violations.length} foreign-key violation(s)`);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  doneNames.add(BOT_HEALTH_INBOX_MIGRATION_NAME);
+  applied.push(BOT_HEALTH_INBOX_MIGRATION_NAME);
+  logger.info({ migration: BOT_HEALTH_INBOX_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
 /**
  * 应用 SQLite baseline 建库脚本及后续增量迁移（幂等）。
  *
@@ -276,6 +369,7 @@ export function applySqliteBaseline(
 
     applyFirstPrivateMessageSqliteMigration(db, doneNames, applied, skipped, logger);
     applyPublishImmediatelySqliteMigration(db, doneNames, applied, skipped, logger);
+    applyBotHealthInboxSqliteMigration(db, doneNames, applied, skipped, logger);
     return { applied, skipped };
   } finally {
     db.close();

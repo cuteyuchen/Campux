@@ -1,13 +1,16 @@
 import type { FastifyBaseLogger } from "fastify";
 import { prisma } from "./prisma";
-import { isQZoneProtocolAutoRefreshCooldownError } from "./qzone-auto-refresh";
 import { decryptJson } from "./secret-json";
 import { parseQZoneVisitorCounts, qzoneVisitorSnapshotDate } from "./qzone-visitor-stats";
 
 type QZoneCookieNotifier = {
-  notifyQZoneCookiesInvalid(botAccountId: string, message: string, options?: { autoRefreshError?: string | null }): Promise<void>;
-  refreshQZoneCookiesByProtocol?(botAccountId: string, reason: "heartbeat_invalid"): Promise<{ cookieNames: string[] }>;
+  notifyQZoneCookiesInvalid?(botAccountId: string, message: string, options?: { autoRefreshError?: string | null }): Promise<void>;
+  refreshQZoneCookiesByProtocol?(
+    botAccountId: string,
+    reason: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid" | "admin_check" | "review_group_refresh",
+  ): Promise<{ cookieNames: string[] }>;
   resumeWaitingPublishAttemptsForBot?(botAccountId: string): Promise<number>;
+  handleQZoneSessionHealth?(botAccountId: string, status: QZoneCookieHealthStatus, message: string, options?: { source?: string; autoRefreshError?: string | null }): Promise<void>;
 };
 
 export const qzoneCookieHealthStatuses = ["unchecked", "available", "invalid"] as const;
@@ -15,9 +18,6 @@ export type QZoneCookieHealthStatus = (typeof qzoneCookieHealthStatuses)[number]
 
 const visitorAmountUrl =
   "https://h5.qzone.qq.com/proxy/domain/g.qzone.qq.com/cgi-bin/friendshow/cgi_get_visitor_more?uin={uin}&mask=7&g_tk={gtk}&page=1&fupdate=1&clear=1";
-const invalidCookieNotifyCooldownMs = 30 * 60 * 1000;
-const invalidCookieNotifyFailureThreshold = 3;
-
 export async function checkQZoneCookieHealth(cookies: Record<string, string>, fallbackUin: string) {
   const pSkey = cookies.p_skey;
   const uin = normalizeQqUin(cookies.uin ?? fallbackUin);
@@ -90,8 +90,16 @@ export async function checkAndUpdateQZoneSession(sessionId: string) {
     return null;
   }
 
-  const cookies = toCookieRecord(decryptJson(session.cookies));
-  const result = await checkQZoneCookieHealth(cookies, session.botAccount.qqUin.toString());
+  let result: Awaited<ReturnType<typeof checkQZoneCookieHealth>>;
+  try {
+    const cookies = toCookieRecord(decryptJson(session.cookies));
+    result = await checkQZoneCookieHealth(cookies, session.botAccount.qqUin.toString());
+  } catch (error) {
+    result = {
+      status: "invalid",
+      message: error instanceof Error ? `cookies 解析失败：${error.message}` : "QZone cookies 解析失败",
+    };
+  }
   const updated = await prisma.botSession.update({
     where: {
       id: session.id,
@@ -134,6 +142,103 @@ export async function checkAndUpdateQZoneSession(sessionId: string) {
   return updated;
 }
 
+/**
+ * 发布接口直接返回登录失效时没有新的健康检查结果，仍要把当前会话
+ * 标成不可用，避免后续预检继续复用旧的 available 状态。
+ */
+export async function markQZoneSessionInvalidForBot(botAccountId: string, message: string) {
+  const session = await prisma.botSession.findFirst({
+    where: {
+      botAccountId,
+      type: "qzone",
+      domain: "user.qzone.qq.com",
+    },
+    orderBy: { refreshedAt: "desc" },
+    select: {
+      id: true,
+      healthStatus: true,
+    },
+  });
+  if (!session) {
+    return null;
+  }
+
+  return prisma.botSession.update({
+    where: { id: session.id },
+    data: {
+      healthStatus: "invalid",
+      healthCheckedAt: new Date(),
+      healthMessage: message,
+      ...(session.healthStatus === "invalid" ? {} : { healthFailureCount: { increment: 1 } }),
+    },
+  });
+}
+
+/**
+ * 统一处理一次 QZone 登录态检测结果。所有主动检测入口都应调用此函数，
+ * 这样“首次失效、自动刷新、故障去重、恢复通知”不会因入口不同而出现不同步。
+ */
+export async function evaluateQZoneSessionHealth(
+  sessionId: string,
+  notifier?: QZoneCookieNotifier,
+  reason: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid" | "admin_check" | "review_group_refresh" = "heartbeat_invalid",
+) {
+  const updated = await checkAndUpdateQZoneSession(sessionId);
+  if (!updated) {
+    return null;
+  }
+  if (updated.healthStatus === "available") {
+    await notifier?.handleQZoneSessionHealth?.(updated.botAccountId, "available", updated.healthMessage ?? "QZone 登录态已恢复", { source: reason });
+    await notifier?.resumeWaitingPublishAttemptsForBot?.(updated.botAccountId);
+    return updated;
+  }
+
+  const refreshTarget = await prisma.publishTarget.findFirst({
+    where: {
+      botAccountId: updated.botAccountId,
+      enabled: true,
+      qzoneRefreshMode: "protocol",
+    },
+    select: { id: true },
+  });
+  let autoRefreshError: string | null = null;
+  // A single invalid transition gets one automatic protocol refresh attempt.
+  // Repeated checks keep the incident reason current without repeatedly
+  // invoking the protocol endpoint (publishing can still explicitly retry).
+  const shouldAttemptAutoRefresh = updated.healthFailureCount === undefined || updated.healthFailureCount <= 1;
+  if (shouldAttemptAutoRefresh && refreshTarget && notifier?.refreshQZoneCookiesByProtocol) {
+    try {
+      await notifier.refreshQZoneCookiesByProtocol(updated.botAccountId, reason);
+      const refreshed = await prisma.botSession.findUnique({ where: { id: updated.id } });
+      if (refreshed?.healthStatus === "available") {
+        await notifier.handleQZoneSessionHealth?.(updated.botAccountId, "available", refreshed.healthMessage ?? "QZone 登录态已恢复", { source: reason });
+        await notifier.resumeWaitingPublishAttemptsForBot?.(updated.botAccountId);
+        return refreshed;
+      }
+      autoRefreshError = refreshed?.healthMessage ? `协议自动刷新后 cookies 仍不可用：${refreshed.healthMessage}` : "协议自动刷新后没有拿到可用 cookies";
+    } catch (error) {
+      autoRefreshError = toErrorMessage(error);
+    }
+  } else if (shouldAttemptAutoRefresh && !refreshTarget) {
+    autoRefreshError = "未配置协议自动刷新";
+  } else if (shouldAttemptAutoRefresh && refreshTarget && !notifier?.refreshQZoneCookiesByProtocol) {
+    autoRefreshError = "协议自动刷新不可用";
+  }
+
+  await notifier?.handleQZoneSessionHealth?.(updated.botAccountId, "invalid", updated.healthMessage ?? "QZone cookies 检测失败", {
+    source: reason,
+    autoRefreshError,
+  });
+  if (notifier && !notifier.handleQZoneSessionHealth && notifier.notifyQZoneCookiesInvalid && !updated.healthInvalidNotifiedAt) {
+    await notifier.notifyQZoneCookiesInvalid(updated.botAccountId, updated.healthMessage ?? "QZone cookies 检测失败", { autoRefreshError });
+    await prisma.botSession.update({
+      where: { id: updated.id },
+      data: { healthInvalidNotifiedAt: new Date() },
+    });
+  }
+  return updated;
+}
+
 export function registerQZoneCookieHeartbeat(logger: FastifyBaseLogger, notifier?: QZoneCookieNotifier) {
   async function run() {
     const sessions = await prisma.botSession.findMany({
@@ -141,75 +246,18 @@ export function registerQZoneCookieHeartbeat(logger: FastifyBaseLogger, notifier
         type: "qzone",
         botAccount: {
           enabled: true,
+          platform: "onebot",
         },
       },
       select: {
         id: true,
-        healthStatus: true,
-        healthFailureCount: true,
-        healthInvalidNotifiedAt: true,
         botAccountId: true,
-        botAccount: {
-          select: {
-            publishTargets: {
-              where: {
-                enabled: true,
-                qzoneRefreshMode: "protocol",
-              },
-              select: {
-                id: true,
-              },
-              take: 1,
-            },
-          },
-        },
       },
     });
 
     for (const session of sessions) {
       try {
-        const updated = await checkAndUpdateQZoneSession(session.id);
-        if (updated?.healthStatus === "available") {
-          await notifier?.resumeWaitingPublishAttemptsForBot?.(session.botAccountId).catch((error) => {
-            logger.warn({ error, sessionId: session.id, botAccountId: session.botAccountId }, "failed to resume waiting publish attempts after qzone heartbeat");
-          });
-        }
-        if (updated?.healthStatus === "invalid" && shouldNotifyInvalidCookies(updated)) {
-          if (session.botAccount.publishTargets.length > 0 && notifier?.refreshQZoneCookiesByProtocol) {
-            try {
-              const result = await notifier.refreshQZoneCookiesByProtocol(session.botAccountId, "heartbeat_invalid");
-              logger.info({ sessionId: session.id, botAccountId: session.botAccountId, cookieCount: result.cookieNames.length }, "qzone cookies auto refreshed after heartbeat invalid");
-              continue;
-            } catch (error) {
-              if (isQZoneProtocolAutoRefreshCooldownError(error)) {
-                logger.debug(
-                  { sessionId: session.id, botAccountId: session.botAccountId, remainingMs: error.remainingMs },
-                  "qzone cookies protocol auto refresh skipped during cooldown after heartbeat invalid",
-                );
-                continue;
-              }
-              logger.warn({ error, sessionId: session.id, botAccountId: session.botAccountId }, "qzone cookies protocol auto refresh failed after heartbeat invalid");
-              await markInvalidCookiesNotified(session.id);
-              await notifier.notifyQZoneCookiesInvalid(session.botAccountId, updated.healthMessage ?? "QZone cookies 检测失败", {
-                autoRefreshError: toErrorMessage(error),
-              }).catch((notifyError) => {
-                logger.warn({ error: notifyError, sessionId: session.id }, "failed to notify qzone cookies invalid");
-              });
-              continue;
-            }
-          }
-          await prisma.botSession.update({
-            where: {
-              id: session.id,
-            },
-            data: {
-              healthInvalidNotifiedAt: new Date(),
-            },
-          });
-          await notifier?.notifyQZoneCookiesInvalid(session.botAccountId, updated.healthMessage ?? "QZone cookies 检测失败").catch((error) => {
-            logger.warn({ error, sessionId: session.id }, "failed to notify qzone cookies invalid");
-          });
-        }
+        await evaluateQZoneSessionHealth(session.id, notifier, "heartbeat_invalid");
       } catch (error) {
         logger.warn({ error, sessionId: session.id }, "qzone cookie heartbeat failed");
       }
@@ -221,26 +269,6 @@ export function registerQZoneCookieHeartbeat(logger: FastifyBaseLogger, notifier
   }, 60_000);
   void run().catch((error) => logger.warn({ error }, "qzone cookie heartbeat failed"));
   return () => clearInterval(timer);
-}
-
-function shouldNotifyInvalidCookies(session: { healthFailureCount: number; healthInvalidNotifiedAt: Date | null }) {
-  if (session.healthFailureCount < invalidCookieNotifyFailureThreshold) {
-    return false;
-  }
-
-  const lastNotifiedAt = session.healthInvalidNotifiedAt?.getTime();
-  return !lastNotifiedAt || Date.now() - lastNotifiedAt >= invalidCookieNotifyCooldownMs;
-}
-
-async function markInvalidCookiesNotified(sessionId: string) {
-  await prisma.botSession.update({
-    where: {
-      id: sessionId,
-    },
-    data: {
-      healthInvalidNotifiedAt: new Date(),
-    },
-  });
 }
 
 function toErrorMessage(error: unknown) {

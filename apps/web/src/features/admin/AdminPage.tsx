@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MAX_IMAGE_MAX_SIZE_MB,
   MIN_IMAGE_MAX_SIZE_MB,
@@ -18,6 +18,7 @@ import {
   KeyRoundIcon,
   MegaphoneIcon,
   MessageSquareTextIcon,
+  PencilIcon,
   PlusIcon,
   QrCodeIcon,
   RadioTowerIcon,
@@ -48,7 +49,7 @@ import {
 } from "../ops/membership-removal-confirmation";
 import { readListPreferences, writeListPreferences } from "@/lib/list-preferences";
 import { hasAnyQueryParam, readQueryInt, readQueryParam, writeQueryParams } from "@/lib/url-query";
-import type { AdminBanRecord, AdminBotAccount, AdminBotEvent, AdminMember, AdminMemberDetail, AdminTab, AiRules, OAuthClientItem, OAuthClientSecretResponse, OAuthClientSettingsResponse, OAuthServerSettings, Pagination, PublishAttemptItem, PublishTargetItem, PublishTextTemplate, TenantAiSettings, TenantMetadata, TenantRole } from "@/types/app";
+import type { AdminBanCandidate, AdminBanRecord, AdminBotAccount, AdminBotEvent, AdminMember, AdminMemberDetail, AdminTab, AiRules, OAuthClientItem, OAuthClientSecretResponse, OAuthClientSettingsResponse, OAuthServerSettings, Pagination, PublishAttemptItem, PublishTargetItem, PublishTextTemplate, TenantAiSettings, TenantMetadata, TenantRole } from "@/types/app";
 import { EmptyCard, LoadingBlock, PaginationControls } from "@/components/app/utility";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,9 +88,11 @@ type TenantSettingsForm = {
 };
 
 type BanForm = {
-  qqUin: string;
+  userId: string;
+  user: AdminBanCandidate["user"] | null;
   comment: string;
   endsAt: string;
+  mode: "create" | "update";
 };
 
 type MemberForm = {
@@ -350,6 +353,11 @@ export function AdminPage({
   const [targets, setTargets] = useState<PublishTargetItem[]>([]);
   const [attempts, setAttempts] = useState<PublishAttemptItem[]>([]);
   const [bans, setBans] = useState<AdminBanRecord[]>([]);
+  const [banCandidates, setBanCandidates] = useState<AdminBanCandidate[]>([]);
+  const [banCandidateKeyword, setBanCandidateKeyword] = useState("");
+  const [banCandidatesLoading, setBanCandidatesLoading] = useState(false);
+  const [banCandidatesOpen, setBanCandidatesOpen] = useState(false);
+  const banCandidateRequestSerial = useRef(0);
   const [memberKeyword, setMemberKeyword] = useState(() => readMemberListPreferences(selectedTenant.id).keyword);
   const [memberRoleFilter, setMemberRoleFilter] = useState<"all" | TenantRole>(() => readMemberListPreferences(selectedTenant.id).roleFilter);
   const [memberSort, setMemberSort] = useState<MemberSort>(() => readMemberListPreferences(selectedTenant.id).sort);
@@ -394,6 +402,14 @@ export function AdminPage({
   }, [selectedTenant.id]);
 
   useEffect(() => {
+    banCandidateRequestSerial.current += 1;
+    setBanForm(defaultBanForm());
+    setBanCandidateKeyword("");
+    setBanCandidates([]);
+    setBanCandidatesOpen(false);
+  }, [selectedTenant.id]);
+
+  useEffect(() => {
     if (activeTab === "users") {
       const preferences = readMemberListPreferences(selectedTenant.id);
       setMemberKeyword(preferences.keyword);
@@ -427,6 +443,26 @@ export function AdminPage({
       toast.error(caught instanceof Error ? caught.message : "无法读取封禁列表");
     });
   }, [selectedTenant.id, banKeyword, onlyActiveBans, banPage]);
+
+  useEffect(() => {
+    // 每次关键词或校园墙变化都立即使上一轮请求失效，避免旧结果覆盖当前候选。
+    banCandidateRequestSerial.current += 1;
+    if (activeTab !== "bans") {
+      return;
+    }
+    const keyword = banCandidateKeyword.trim();
+    if (!keyword) {
+      setBanCandidates([]);
+      setBanCandidatesLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void refreshBanCandidates(keyword).catch((caught) => {
+        toast.error(caught instanceof Error ? caught.message : "无法读取封禁候选用户");
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, selectedTenant.id, banCandidateKeyword]);
 
   useEffect(() => {
     if (activeTab !== "publish" && activeTab !== "bots") {
@@ -549,6 +585,74 @@ export function AdminPage({
     } finally {
       setBansLoading(false);
     }
+  }
+
+  async function refreshBanCandidates(
+    keyword = banCandidateKeyword.trim(),
+    requestSerial = banCandidateRequestSerial.current + 1,
+  ): Promise<AdminBanCandidate[]> {
+    const normalized = keyword.trim();
+    banCandidateRequestSerial.current = requestSerial;
+    if (!normalized) {
+      setBanCandidates([]);
+      return [];
+    }
+    setBanCandidatesLoading(true);
+    try {
+      const params = new URLSearchParams({ q: normalized, limit: "20" });
+      const data = await api<{ candidates: AdminBanCandidate[] }>(`/api/admin/ban-candidates?${params}`);
+      if (requestSerial === banCandidateRequestSerial.current) {
+        setBanCandidates(data.candidates);
+      }
+      return data.candidates;
+    } finally {
+      if (requestSerial === banCandidateRequestSerial.current) {
+        setBanCandidatesLoading(false);
+      }
+    }
+  }
+
+  function selectBanCandidate(candidate: AdminBanCandidate) {
+    if (!candidate.selectable) {
+      return;
+    }
+    const nextDefault = defaultBanForm();
+    setBanForm({
+      userId: candidate.user.id,
+      user: candidate.user,
+      comment: candidate.activeBan?.comment ?? "",
+      endsAt: candidate.activeBan ? toLocalDateTimeValue(new Date(candidate.activeBan.endsAt)) : nextDefault.endsAt,
+      mode: candidate.activeBan ? "update" : "create",
+    });
+    setBanCandidateKeyword(candidateDisplayLabel(candidate));
+    setBanCandidatesOpen(false);
+  }
+
+  function prepareBanForMember(member: AdminMember) {
+    if (member.role === "admin") {
+      return;
+    }
+    const candidate: AdminBanCandidate = {
+      user: member.user,
+      role: member.role,
+      selectable: true,
+      activeBan: null,
+      activeBanCount: 0,
+    };
+    setBanForm({
+      ...defaultBanForm(),
+      userId: candidate.user.id,
+      user: candidate.user,
+    });
+    setBanCandidateKeyword(candidateDisplayLabel(candidate));
+    setBanCandidatesOpen(false);
+    onTabChange("bans");
+    void refreshBanCandidates(candidate.user.qqUin).then((latestCandidates) => {
+      const latest = latestCandidates.find((item) => item.user.id === candidate.user.id);
+      if (latest) {
+        selectBanCandidate(latest);
+      }
+    }).catch(() => undefined);
   }
 
   async function saveSettings() {
@@ -823,18 +927,23 @@ export function AdminPage({
   }
 
   async function banUser() {
+    if (!banForm.userId) {
+      toast.error("请先选择要封禁的用户。");
+      return;
+    }
     setBusy(true);
     try {
-      await api("/api/admin/ban-records", {
+      const result = await api<{ action: "created" | "updated" }>("/api/admin/ban-records", {
         method: "POST",
         body: JSON.stringify({
-          qqUin: banForm.qqUin,
+          userId: banForm.userId,
           comment: banForm.comment,
           endsAt: new Date(banForm.endsAt).toISOString(),
         }),
       });
       setBanForm(defaultBanForm());
-      toast.success("用户已封禁。");
+      setBanCandidateKeyword("");
+      toast.success(result.action === "updated" ? "封禁信息已更新。" : "用户已封禁。");
       await refreshBans();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "封禁失败");
@@ -848,6 +957,21 @@ export function AdminPage({
       method: "POST",
     });
     await refreshBans();
+  }
+
+  function prepareBanUpdate(ban: AdminBanRecord) {
+    if (!ban.user) {
+      return;
+    }
+    setBanForm({
+      userId: ban.user.id,
+      user: ban.user,
+      comment: ban.comment,
+      endsAt: toLocalDateTimeValue(new Date(ban.endsAt)),
+      mode: "update",
+    });
+    setBanCandidateKeyword(candidateDisplayLabel({ user: ban.user }));
+    setBanCandidatesOpen(false);
   }
 
   async function addBot() {
@@ -983,6 +1107,21 @@ export function AdminPage({
       method: "POST",
     });
     await refreshAdminData();
+  }
+
+  async function retryFailedBotMessages(botId: string) {
+    setBusy(true);
+    try {
+      const result = await api<{ count: number }>(`/api/admin/bots/${botId}/message-inbox/retry-failed`, {
+        method: "POST",
+      });
+      toast.success(result.count > 0 ? `已重试 ${result.count} 条失败消息。` : "当前没有失败消息。");
+      await refreshAdminData();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "重试失败消息失败");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function refreshPublishLogs() {
@@ -1145,10 +1284,7 @@ export function AdminPage({
                 onAddMember={() => void addMember()}
                 onRoleChange={(member, role) => void updateMemberRole(member, role)}
                 onViewMember={(member) => void openMemberDetail(member.user.id)}
-                onPrepareBan={(member) => {
-                  setBanForm((current) => ({ ...current, qqUin: member.user.qqUin }));
-                  onTabChange("bans");
-                }}
+                onPrepareBan={prepareBanForMember}
               />
             </TabsContent>
 
@@ -1157,11 +1293,30 @@ export function AdminPage({
                 bans={bans}
                 pagination={banPagination}
                 form={banForm}
+                candidates={banCandidates}
+                candidateKeyword={banCandidateKeyword}
+                candidatesLoading={banCandidatesLoading}
+                candidatesOpen={banCandidatesOpen}
                 keyword={banKeyword}
                 onlyActive={onlyActiveBans}
                 busy={busy}
                 loading={bansLoading || adminLoading}
                 onFormChange={setBanForm}
+                onCandidateKeywordChange={(value) => {
+                  setBanCandidateKeyword(value);
+                  setBanCandidatesOpen(true);
+                  if (banForm.userId && value !== candidateDisplayLabel({ user: banForm.user })) {
+                    setBanForm((current) => ({ ...current, userId: "", user: null, comment: "", mode: "create" }));
+                  }
+                }}
+                onCandidateFocus={() => setBanCandidatesOpen(true)}
+                onCandidateBlur={() => window.setTimeout(() => setBanCandidatesOpen(false), 150)}
+                onCandidateSelect={selectBanCandidate}
+                onCandidateClear={() => {
+                  setBanForm(defaultBanForm());
+                  setBanCandidateKeyword("");
+                  setBanCandidatesOpen(false);
+                }}
                 onKeywordChange={(value) => {
                   setBanKeyword(value);
                   setBanPage(1);
@@ -1181,6 +1336,7 @@ export function AdminPage({
                 onRefresh={() => void refreshBans()}
                 onSubmit={() => void banUser()}
                 onUnban={(id) => void unban(id)}
+                onEdit={(ban) => prepareBanUpdate(ban)}
               />
             </TabsContent>
 
@@ -1288,6 +1444,7 @@ export function AdminPage({
                 onAdd={() => void addBot()}
                 onDelete={(id) => void deleteBot(id)}
                 onUpdateConfig={(botId, patch) => void updateBotConfig(botId, patch)}
+                onRetryFailedMessages={(botId) => void retryFailedBotMessages(botId)}
                 onRefresh={() => void refreshAdminData()}
               />
             </TabsContent>
@@ -1515,11 +1672,11 @@ function UsersPanel({
                     </SelectContent>
                   </Select>
                 </div>
-                <Button variant="outline" size="sm" onClick={(event) => {
+                <Button variant="outline" size="sm" disabled={member.role === "admin"} onClick={(event) => {
                   event.stopPropagation();
                   onPrepareBan(member);
                 }}>
-                  封禁
+                  {member.role === "admin" ? "不可封禁" : "封禁"}
                 </Button>
               </div>
             </div>
@@ -1661,51 +1818,118 @@ function BansPanel({
   bans,
   pagination,
   form,
+  candidates,
+  candidateKeyword,
+  candidatesLoading,
+  candidatesOpen,
   keyword,
   onlyActive,
   busy,
   loading,
   onFormChange,
+  onCandidateKeywordChange,
+  onCandidateFocus,
+  onCandidateBlur,
+  onCandidateSelect,
+  onCandidateClear,
   onKeywordChange,
   onOnlyActiveChange,
   onPageChange,
   onRefresh,
   onSubmit,
   onUnban,
+  onEdit,
 }: {
   bans: AdminBanRecord[];
   pagination: Pagination;
   form: BanForm;
+  candidates: AdminBanCandidate[];
+  candidateKeyword: string;
+  candidatesLoading: boolean;
+  candidatesOpen: boolean;
   keyword: string;
   onlyActive: boolean;
   busy: boolean;
   loading: boolean;
   onFormChange: (form: BanForm) => void;
+  onCandidateKeywordChange: (value: string) => void;
+  onCandidateFocus: () => void;
+  onCandidateBlur: () => void;
+  onCandidateSelect: (candidate: AdminBanCandidate) => void;
+  onCandidateClear: () => void;
   onKeywordChange: (value: string) => void;
   onOnlyActiveChange: (value: boolean) => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void;
   onSubmit: () => void;
   onUnban: (id: string) => void;
+  onEdit: (ban: AdminBanRecord) => void;
 }) {
   return (
     <Card className="rounded-md border-slate-200 bg-white shadow-none">
       <CardContent className="p-4">
         <PanelTitle icon={ShieldCheckIcon} title="封禁管理" description="查看封禁记录，或临时封禁用户" color="product-accent-rose" />
-        <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto]">
-          <Input
-            className="bg-white"
-            inputMode="numeric"
-            placeholder="输入要封禁的 QQ 号"
-            value={form.qqUin}
-            onChange={(event) => onFormChange({ ...form, qqUin: event.target.value.replace(/\D/g, "") })}
-          />
+        <div className="mt-3 grid gap-2 md:grid-cols-[minmax(240px,1.2fr)_minmax(180px,1fr)_220px_auto]">
+          <div className="relative">
+            <Input
+              className="bg-white pr-10"
+              placeholder="搜索 QQ 号、用户 ID 或昵称"
+              value={candidateKeyword}
+              onFocus={onCandidateFocus}
+              onBlur={onCandidateBlur}
+              onChange={(event) => onCandidateKeywordChange(event.target.value)}
+              aria-label="搜索封禁候选用户"
+              aria-expanded={candidatesOpen}
+              aria-autocomplete="list"
+            />
+            {candidateKeyword ? (
+              <button
+                type="button"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                onClick={onCandidateClear}
+                aria-label="清空封禁用户选择"
+                title="清空选择"
+              >
+                <RotateCcwIcon className="size-4" />
+              </button>
+            ) : null}
+            {candidatesOpen && candidateKeyword.trim() ? (
+              <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 max-h-64 overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg">
+                {candidatesLoading ? <p className="px-3 py-2 text-sm text-slate-500">正在搜索...</p> : null}
+                {!candidatesLoading && candidates.length === 0 ? <p className="px-3 py-2 text-sm text-slate-500">没有匹配的校园墙成员</p> : null}
+                {!candidatesLoading && candidates.map((candidate) => (
+                  <button
+                    key={candidate.user.id}
+                    type="button"
+                    disabled={!candidate.selectable}
+                    className="flex w-full items-center gap-2 rounded px-2 py-2 text-left transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => onCandidateSelect(candidate)}
+                  >
+                    <QqAvatar qqUin={candidate.user.qqUin} name={candidate.user.displayName ?? candidate.user.qqUin} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold text-slate-900">{candidate.user.displayName ?? candidate.user.qqUin}</span>
+                      <span className="block truncate text-xs text-slate-500">QQ {candidate.user.qqUin} · 用户 ID {candidate.user.id}</span>
+                    </span>
+                    <span className="shrink-0 text-xs font-semibold text-slate-500">{roleLabels[candidate.role]}</span>
+                    {candidate.activeBan ? <Badge variant="destructive">已封禁</Badge> : null}
+                    {!candidate.selectable ? <span className="shrink-0 text-xs font-semibold text-slate-400">不可选择</span> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <Input className="bg-white" placeholder="封禁原因" value={form.comment} onChange={(event) => onFormChange({ ...form, comment: event.target.value })} />
-          <Input className="bg-white" type="datetime-local" value={form.endsAt} onChange={(event) => onFormChange({ ...form, endsAt: event.target.value })} />
-          <Button className="font-medium" variant="destructive" disabled={busy || !form.qqUin || !form.comment || !form.endsAt} onClick={onSubmit}>
-            封禁
+          <Input className="bg-white" type="datetime-local" value={form.endsAt} disabled={!form.userId} onChange={(event) => onFormChange({ ...form, endsAt: event.target.value })} />
+          <Button className="font-medium" variant="destructive" disabled={busy || !form.userId || !form.comment || !form.endsAt} onClick={onSubmit}>
+            {form.mode === "update" ? "更新封禁" : "封禁"}
           </Button>
         </div>
+        {form.user ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+            <span>已选择：{form.user.displayName ?? form.user.qqUin}（QQ {form.user.qqUin}）</span>
+            {form.mode === "update" ? <Badge variant="outline">将更新当前生效封禁</Badge> : null}
+          </div>
+        ) : null}
 
         <div className="mt-4 grid gap-2 md:grid-cols-[1fr_auto_auto]">
           <Input className="bg-white" placeholder="按用户 ID、QQ 号或名称筛选封禁记录" value={keyword} onChange={(event) => onKeywordChange(event.target.value)} />
@@ -1725,7 +1949,7 @@ function BansPanel({
             <EmptyCard title="暂无封禁记录" />
           ) : (
             bans.map((ban) => (
-            <div key={ban.id} className="product-row-card flex flex-wrap items-center justify-between gap-2 p-3">
+              <div key={ban.id} className="product-row-card flex flex-wrap items-center justify-between gap-2 p-3">
                 <div className="flex min-w-0 items-start gap-3">
                   {ban.user ? <QqAvatar qqUin={ban.user.qqUin} name={ban.user.displayName ?? ban.user.qqUin} /> : <div className="size-10 rounded-full bg-slate-100" />}
                   <div className="min-w-0">
@@ -1741,9 +1965,15 @@ function BansPanel({
                   </div>
                 </div>
                 {ban.active ? (
-                  <Button variant="outline" size="sm" onClick={() => onUnban(ban.id)}>
-                    解封
-                  </Button>
+                  <div className="flex shrink-0 gap-2">
+                    <Button variant="outline" size="sm" onClick={() => onEdit(ban)}>
+                      <PencilIcon data-icon="inline-start" />
+                      修改
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => onUnban(ban.id)}>
+                      解封
+                    </Button>
+                  </div>
                 ) : null}
               </div>
             ))
@@ -2746,6 +2976,7 @@ function BotsPanel({
   onAdd,
   onDelete,
   onUpdateConfig,
+  onRetryFailedMessages,
   onRefresh,
 }: {
   bots: AdminBotAccount[];
@@ -2759,6 +2990,7 @@ function BotsPanel({
     botId: string,
     patch: Partial<Pick<AdminBotAccount, "displayName" | "enabled" | "reviewGroupId" | "officialAppId" | "officialAppSecret" | "reviewNotificationEnabled" | "reviewQueueAutoReminderEnabled" | "reviewQueueReminderThresholdHours" | "autoFriendRequestApprovalEnabled" | "userMessageReply" | "userMessageReplyCooldownSeconds" | "reviewGroupMessageReply">>,
   ) => void;
+  onRetryFailedMessages: (botId: string) => void;
   onRefresh: () => void;
 }) {
   const [guilds, setGuilds] = useState<OfficialQqGuildOption[]>([]);
@@ -2933,9 +3165,10 @@ function BotsPanel({
                   <div className="min-w-0">
                     <div className="mt-0.5 flex flex-wrap items-center gap-2">
                       <p className="truncate text-base font-semibold text-slate-950">{bot.displayName}</p>
-                      <Badge className={`rounded-full shadow-none ${bot.connection.online ? "bg-green-50 text-green-800 ring-1 ring-green-200" : "bg-slate-100 text-slate-500"}`}>
-                        {bot.connection.online ? "在线" : "离线"}
+                      <Badge className={`rounded-full shadow-none ${bot.platform === "official_qq" || bot.connection.status === "online" || bot.connection.online ? "bg-green-50 text-green-800 ring-1 ring-green-200" : bot.connection.status === "reconnecting" ? "bg-amber-50 text-amber-800 ring-1 ring-amber-200" : "bg-slate-100 text-slate-500"}`}>
+                        {bot.platform === "official_qq" ? (bot.enabled ? "在线" : "停用") : bot.connection.status === "reconnecting" ? "重连宽限" : bot.connection.status === "offline" && bot.activeIncidents.some((incident) => incident.kind === "onebot_connection") ? "离线告警" : !bot.connection.online ? "未连接" : "在线"}
                       </Badge>
+                      {bot.activeIncidents.some((incident) => incident.kind === "qzone_session") ? <Badge className="rounded-full bg-red-50 text-red-700 ring-1 ring-red-200 shadow-none">空间登录态不可用</Badge> : null}
                       {!bot.enabled ? <Badge className="rounded-full bg-red-50 text-red-700 ring-1 ring-red-200 shadow-none">停用</Badge> : null}
                     </div>
                     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-sm text-slate-600">
@@ -2954,6 +3187,12 @@ function BotsPanel({
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {bot.platform === "onebot" ? <CopyBotUrlButton bot={bot} /> : null}
+                    {bot.platform === "onebot" && bot.failedMessageCount > 0 ? (
+                      <Button variant="outline" size="sm" disabled={busy} onClick={() => onRetryFailedMessages(bot.id)}>
+                        <RotateCcwIcon data-icon="inline-start" />
+                        重试失败消息
+                      </Button>
+                    ) : null}
                     <Button variant="outline" size="sm" disabled={busy} onClick={() => onDelete(bot.id)}>
                       <Trash2Icon data-icon="inline-start" />
                       删除
@@ -2963,13 +3202,16 @@ function BotsPanel({
 
                 <div className="mt-3 grid gap-2 text-sm">
                   {bot.platform === "onebot" ? (
-                    <BotMetric icon={bot.connection.online ? WifiIcon : WifiOffIcon} label="连接" value={bot.connection.online ? `${bot.connection.connectionCount} 条` : "未连接"} />
+                    <BotMetric icon={bot.connection.online ? WifiIcon : WifiOffIcon} label="连接" value={bot.connection.status === "reconnecting" ? "重连宽限" : bot.connection.online ? `${bot.connection.connectionCount} 条` : "未连接"} />
                   ) : (
                     <BotMetric icon={bot.enabled ? WifiIcon : WifiOffIcon} label="状态" value={bot.enabled ? "已启用" : "已停用"} />
                   )}
-                  <BotMetric label="最近心跳" value={bot.lastSeenAt ? formatDateTime(bot.lastSeenAt) : "暂无"} />
+                  <BotMetric label="最近心跳" value={(bot.lastHeartbeatAt || bot.lastSeenAt) ? formatDateTime(bot.lastHeartbeatAt ?? bot.lastSeenAt ?? "") : "暂无"} />
+                  {bot.platform === "onebot" ? <BotMetric label="消息积压" value={`${bot.pendingMessageCount} 待处理 / ${bot.failedMessageCount} 失败`} /> : null}
                   {bot.platform === "onebot" ? <BotMetric label="发布目标" value={`${bot.publishTargets.length} 个`} /> : null}
                 </div>
+                {bot.latestError ? <p className="mt-2 break-words rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700">最近错误：{bot.latestError}</p> : null}
+                {bot.activeIncident ? <p className="mt-2 rounded-md border border-amber-100 bg-amber-50 px-2 py-1.5 text-xs font-semibold text-amber-800">故障开始：{formatDateTime(bot.activeIncident.startedAt)} · {bot.activeIncident.reason}</p> : null}
 
                 <BotConfigEditor bot={bot} busy={busy} onSave={(patch) => onUpdateConfig(bot.id, patch)} />
                 {bot.platform === "onebot" ? <OneBotConnectionBox bot={bot} /> : null}
@@ -4158,10 +4400,19 @@ function oauthClientToForm(client: OAuthClientItem): OAuthClientForm {
 function defaultBanForm(): BanForm {
   const endsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   return {
-    qqUin: "",
+    userId: "",
+    user: null,
     comment: "",
     endsAt: toLocalDateTimeValue(endsAt),
+    mode: "create",
   };
+}
+
+function candidateDisplayLabel(candidate: { user: AdminBanCandidate["user"] | null } | null) {
+  if (!candidate?.user) {
+    return "";
+  }
+  return candidate.user.displayName ?? candidate.user.qqUin;
 }
 
 function defaultMemberForm(): MemberForm {
@@ -4221,6 +4472,9 @@ function qqAvatarUrl(qqUin: string) {
 }
 
 function toLocalDateTimeValue(date: Date) {
+  if (date.getUTCFullYear() >= 9999) {
+    return "9999-12-31T23:59";
+  }
   const offset = date.getTimezoneOffset();
   const local = new Date(date.getTime() - offset * 60 * 1000);
   return local.toISOString().slice(0, 16);
@@ -4298,6 +4552,12 @@ function formatBotEventAction(action: string) {
     "bot.qzone.cookies.refresh": "刷新空间登录态",
     "bot.qzone.cookies.auto_refresh": "自动刷新空间登录态",
     "bot.qzone.cookies.auto_refresh_failed": "自动刷新空间登录态失败",
+    "bot.qzone.cookies.invalid": "空间登录态不可用",
+    "bot.qzone.cookies.recovered": "空间登录态恢复",
+    "bot.connection.offline": "Bot 连接离线",
+    "bot.connection.recovered": "Bot 连接恢复",
+    "bot.message.replay_failed": "离线消息补偿失败",
+    "ban.update": "更新封禁",
     "publish_target.create": "创建发布目标",
     "publish_target.update": "更新发布目标",
     "publish_attempt.retry": "重试发布",

@@ -144,6 +144,10 @@ describe("private posting command parsing", () => {
     expect(parsePrivatePostManagementCommand("撤回")).toEqual({ name: "withdraw_list" });
     expect(parsePrivatePostManagementCommand("#撤回")).toEqual({ name: "withdraw_list" });
     expect(parsePrivatePostManagementCommand("撤回123")).toEqual({ name: "withdraw", displayId: 123, reason: null });
+    expect(parsePrivatePostManagementCommand("撤回 12")).toEqual({ name: "withdraw", displayId: 12, reason: null });
+    expect(parsePrivatePostManagementCommand("撤回12有误")).toEqual({ name: "withdraw", displayId: 12, reason: "有误" });
+    expect(parsePrivatePostManagementCommand("撤回 12 有误")).toEqual({ name: "withdraw", displayId: 12, reason: "有误" });
+    expect(parsePrivatePostManagementCommand("撤回 #12有误")).toEqual({ name: "withdraw", displayId: 12, reason: "有误" });
     expect(parsePrivatePostManagementCommand("撤回 #123 不想公开了")).toEqual({ name: "withdraw", displayId: 123, reason: "不想公开了" });
     expect(parsePrivatePostManagementCommand("#撤回 456 内容有误")).toEqual({ name: "withdraw", displayId: 456, reason: "内容有误" });
   });

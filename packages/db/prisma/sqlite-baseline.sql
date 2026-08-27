@@ -276,6 +276,47 @@ CREATE TABLE "BotSession" (
 );
 
 -- CreateTable
+CREATE TABLE "BotHealthIncident" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tenantId" TEXT NOT NULL,
+    "botAccountId" TEXT NOT NULL,
+    "kind" TEXT NOT NULL,
+    "startedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "resolvedAt" DATETIME,
+    "reason" TEXT NOT NULL,
+    "details" JSONB,
+    "faultNotifiedAt" DATETIME,
+    "recoveryNotifiedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "BotHealthIncident_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "BotHealthIncident_botAccountId_fkey" FOREIGN KEY ("botAccountId") REFERENCES "BotAccount" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "BotMessageInbox" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "tenantId" TEXT NOT NULL,
+    "botAccountId" TEXT NOT NULL,
+    "eventKey" TEXT NOT NULL,
+    "rawEvent" JSONB NOT NULL,
+    "messageType" TEXT NOT NULL,
+    "conversationKey" TEXT NOT NULL,
+    "eventTime" DATETIME,
+    "receivedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "status" TEXT NOT NULL DEFAULT 'pending',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "availableAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lockedAt" DATETIME,
+    "lastError" TEXT,
+    "processedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "BotMessageInbox_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "BotMessageInbox_botAccountId_fkey" FOREIGN KEY ("botAccountId") REFERENCES "BotAccount" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
 CREATE TABLE "QZoneVisitorSnapshot" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "tenantId" TEXT NOT NULL,
@@ -543,7 +584,6 @@ CREATE INDEX "PostLog_tenantId_postId_createdAt_idx" ON "PostLog"("tenantId", "p
 CREATE UNIQUE INDEX "BotAccount_tenantId_qqUin_key" ON "BotAccount"("tenantId", "qqUin");
 
 -- CreateIndex
--- CreateIndex
 CREATE UNIQUE INDEX "BotAccount_connectionToken_key" ON "BotAccount"("connectionToken");
 
 -- CreateIndex
@@ -551,6 +591,27 @@ CREATE INDEX "BotSession_botAccountId_refreshedAt_idx" ON "BotSession"("botAccou
 
 -- CreateIndex
 CREATE UNIQUE INDEX "BotSession_botAccountId_type_domain_key" ON "BotSession"("botAccountId", "type", "domain");
+
+-- CreateIndex
+CREATE INDEX "BotHealthIncident_tenantId_botAccountId_kind_resolvedAt_idx" ON "BotHealthIncident"("tenantId", "botAccountId", "kind", "resolvedAt");
+
+-- CreateIndex
+CREATE INDEX "BotHealthIncident_botAccountId_kind_startedAt_idx" ON "BotHealthIncident"("botAccountId", "kind", "startedAt");
+
+-- CreateIndex
+CREATE INDEX "BotMessageInbox_botAccountId_status_availableAt_idx" ON "BotMessageInbox"("botAccountId", "status", "availableAt");
+
+-- CreateIndex
+CREATE INDEX "BotMessageInbox_tenantId_status_availableAt_idx" ON "BotMessageInbox"("tenantId", "status", "availableAt");
+
+-- CreateIndex
+CREATE INDEX "BotMessageInbox_conversationKey_status_availableAt_idx" ON "BotMessageInbox"("conversationKey", "status", "availableAt");
+
+-- CreateIndex
+CREATE INDEX "BotMessageInbox_processedAt_idx" ON "BotMessageInbox"("processedAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "BotMessageInbox_botAccountId_eventKey_key" ON "BotMessageInbox"("botAccountId", "eventKey");
 
 -- CreateIndex
 CREATE INDEX "QZoneVisitorSnapshot_tenantId_date_idx" ON "QZoneVisitorSnapshot"("tenantId", "date");

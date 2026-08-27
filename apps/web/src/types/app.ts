@@ -435,7 +435,28 @@ export type AdminBotAccount = {
   connection: {
     online: boolean;
     connectionCount: number;
+    healthyConnectionCount?: number;
+    lastHeartbeatAt?: number | null;
+    status?: "online" | "reconnecting" | "offline" | string;
+    reconnectGraceEndsAt?: string | null;
+    offlineSince?: string | null;
   };
+  activeIncidents: Array<{
+    id: string;
+    kind: "onebot_connection" | "qzone_session" | string;
+    startedAt: string;
+    reason: string;
+  }>;
+  activeIncident: {
+    id: string;
+    kind: "onebot_connection" | "qzone_session" | string;
+    startedAt: string;
+    reason: string;
+  } | null;
+  pendingMessageCount: number;
+  failedMessageCount: number;
+  latestError: string | null;
+  lastHeartbeatAt: string | null;
   sessions: Array<{
     id: string;
     type: string;
@@ -673,6 +694,23 @@ export type AdminBanRecord = {
     qqUin: string;
     displayName: string | null;
   } | null;
+};
+
+export type AdminBanCandidate = {
+  user: {
+    id: string;
+    qqUin: string;
+    displayName: string | null;
+  };
+  role: TenantRole;
+  selectable: boolean;
+  activeBan: {
+    id: string;
+    comment: string;
+    startsAt: string;
+    endsAt: string;
+  } | null;
+  activeBanCount: number;
 };
 
 export type TenantStatus = "active" | "paused" | "archived";

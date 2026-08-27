@@ -39,13 +39,33 @@ import {
   validateProcessedImageSize,
 } from "../lib/image-upload-policy";
 import { detectPostInjection, createAutoBan } from "../lib/sanitize";
+import {
+  banManagementErrorResponse,
+  endActiveBanRecords,
+  upsertBanRecord,
+} from "../lib/ban-management";
 import { readTenantAiSettings } from "./ai-settings";
 import type { RuntimeQueue } from "./queue";
-import { checkAndUpdateQZoneSession } from "../lib/qzone-cookies";
+import { checkAndUpdateQZoneSession, evaluateQZoneSessionHealth, markQZoneSessionInvalidForBot } from "../lib/qzone-cookies";
 import { QZoneProtocolAutoRefreshCooldownError, qzoneProtocolAutoRefreshFailureCooldownMs } from "../lib/qzone-auto-refresh";
 import { pollQZoneQrLogin, startQZoneQrLogin } from "../lib/qzone-login";
 import { resumePublishAttemptsWaitingForCookies } from "./publishing";
 import { selectReviewNotificationBot } from "./notification-routing";
+import {
+  BotMessageInboxConsumer,
+  enqueueBotMessageInbox,
+  shouldPersistBotMessageEvent,
+  type BotInboxMessageEvent,
+} from "../lib/bot-message-inbox";
+import {
+  healthIncidentDurationMs,
+  listPendingBotHealthNotifications,
+  markBotHealthIncidentFaultNotified,
+  markBotHealthIncidentRecoveryNotified,
+  openBotHealthIncident,
+  resolveBotHealthIncident,
+  silentlyResolveBotHealthIncidents,
+} from "../lib/bot-health";
 import {
   formatNewPostReviewNotification,
   formatPostCancelled,
@@ -64,7 +84,6 @@ import {
   publishFailedLoginHint,
   formatPublishWaiting,
   publishWaitingResumeHint,
-  formatCookiesInvalid,
   formatCookiesAutoRefreshed,
   formatCookiesRefreshed,
   formatSubmissionSuccess,
@@ -107,6 +126,11 @@ import {
   formatUnbanNotFound,
   formatBanNotify,
   formatUnbanNotify,
+  formatBotConnectionOffline,
+  formatBotConnectionRecovered,
+  formatQZoneSessionInvalid,
+  formatQZoneSessionRecovered,
+  formatBotMessageReplayFailed,
   escapeCqCode,
 } from "../lib/bot-messages";
 import { buildFriendRequestAutoApprovePlan, buildSetFriendAddRequestParams, type OneBotRequestEvent } from "./onebot-friend-requests";
@@ -118,6 +142,9 @@ type OneBotConnection = {
   botAccountId: string;
   tenantId: string;
   selfId: string | null;
+  connectedAt: number;
+  lastHeartbeatAt: number;
+  protocolOnline: boolean | null;
 };
 
 type WebSocketLike = {
@@ -230,6 +257,7 @@ type PrivatePostAggregateBuffer = {
 
 type OneBotMessageEvent = {
   post_type?: string;
+  meta_event_type?: string;
   request_type?: string;
   notice_type?: string;
   sub_type?: string;
@@ -247,6 +275,8 @@ type OneBotMessageEvent = {
     card?: string;
   };
   message_id?: number | string;
+  time?: number | string;
+  interval?: number | string;
   // Some OneBot implementations include reply metadata in the message segments
   // but we treat them as part of `message` / `raw_message` as fallback.
 };
@@ -263,7 +293,7 @@ const reviewHelp = [
   "#回复 <内容> （引用转发私信后使用）",
   "#发布 <内容> （可附带图片，文字+图片一起发布到空间）",
   "#撤回 [tid] （回复 #发布 成功消息可撤回刚发布的说说）",
-  "#封禁 <QQ号> <理由> 或 ban <QQ号> <理由>",
+  "#封禁 <QQ号> <理由> 或 ban <QQ号> <理由>（再次操作会更新封禁）",
   "#解封 <QQ号> 或 unban <QQ号>",
   "#好友数",
   "#登录 或 #刷新qzone cookies",
@@ -281,6 +311,10 @@ function readRecallReason(comment: string | undefined): string | null {
 
 export class OneBotRuntime {
   private readonly connections = new Set<OneBotConnection>();
+  private readonly monitoredBotAccountIds = new Set<string>();
+  private readonly mutedBotAccountIds = new Set<string>();
+  private readonly connectionOfflineCandidates = new Map<string, { botAccountId: string; botQqUin: string; tenantId: string; since: number; reason: string }>();
+  private readonly lastHeartbeatAtByBotAccountId = new Map<string, number>();
   private readonly pendingActions = new Map<string, PendingAction>();
   private readonly privateAutoReplyAt = new Map<string, number>();
   private readonly privateForwardBuffers = new Map<string, PrivateForwardBuffer>();
@@ -298,25 +332,66 @@ export class OneBotRuntime {
   private readonly qzoneProtocolAutoRefreshFailures = new Map<string, QZoneProtocolAutoRefreshFailure>();
   private readonly qzoneProtocolAutoRefreshInFlight = new Map<string, Promise<{ cookieNames: string[]; session: { id: string } }>>();
   private readonly reviewQueueReminderTimer: Timer | null;
+  private readonly connectionHealthTimer: Timer | null;
+  private readonly inboxRetryTimer: Timer | null;
+  private readonly inboxCleanupTimer: Timer | null;
+  private readonly inboxConsumer: BotMessageInboxConsumer;
   private reviewQueueReminderRunning = false;
+  private connectionHealthRunning = false;
+  private healthNotificationFlush: Promise<void> | null = null;
+  private monitoredBotAccountsHydrated = false;
 
   constructor(
     private readonly queue: RuntimeQueue,
     private readonly logger: FastifyBaseLogger,
     private readonly config?: CampuxConfig,
   ) {
-    this.reviewQueueReminderTimer = process.env.NODE_ENV === "test" || this.config?.nodeEnv === "production"
+    this.inboxConsumer = new BotMessageInboxConsumer({
+      logger: this.logger,
+    });
+    const testRuntime = process.env.NODE_ENV === "test" || this.config?.nodeEnv === "test";
+    this.reviewQueueReminderTimer = testRuntime || this.config?.nodeEnv === "production"
       ? null
       : setInterval(() => {
           this.runReviewQueueReminderScan().catch((error) => {
             this.logger.warn({ error }, "review queue reminder scan failed");
           });
         }, reviewQueueReminderIntervalMs);
+    this.connectionHealthTimer = testRuntime
+      ? null
+      : setInterval(() => {
+          this.scanConnectionHealth().catch((error) => {
+            this.logger.warn({ error }, "onebot connection health scan failed");
+          });
+        }, 15_000);
+    this.inboxRetryTimer = testRuntime
+      ? null
+      : setInterval(() => {
+          this.consumePendingMessageInboxes().catch((error) => {
+            this.logger.warn({ error }, "bot message inbox retry scan failed");
+          });
+        }, 5_000);
+    this.inboxCleanupTimer = testRuntime
+      ? null
+      : setInterval(() => {
+          this.inboxConsumer.cleanupProcessed().catch((error) => {
+            this.logger.warn({ error }, "bot message inbox cleanup failed");
+          });
+        }, 60 * 60 * 1000);
   }
 
   close() {
     if (this.reviewQueueReminderTimer) {
       clearInterval(this.reviewQueueReminderTimer);
+    }
+    if (this.connectionHealthTimer) {
+      clearInterval(this.connectionHealthTimer);
+    }
+    if (this.inboxRetryTimer) {
+      clearInterval(this.inboxRetryTimer);
+    }
+    if (this.inboxCleanupTimer) {
+      clearInterval(this.inboxCleanupTimer);
     }
   }
 
@@ -332,9 +407,19 @@ export class OneBotRuntime {
       botAccountId: auth.id,
       tenantId: auth.tenantId,
       selfId: auth.qqUin.toString(),
+      connectedAt: Date.now(),
+      lastHeartbeatAt: Date.now(),
+      protocolOnline: true,
     };
     this.connections.add(connection);
+    this.recordConnectionHeartbeat(connection);
+    this.mutedBotAccountIds.delete(connection.botAccountId);
+    this.monitoredBotAccountIds.add(connection.botAccountId);
+    this.connectionOfflineCandidates.delete(connection.botAccountId);
     this.markBotSeen(connection).catch((error) => this.logger.warn({ error, selfId: connection.selfId }, "failed to mark onebot bot seen"));
+    this.handleBotConnectionRecovered(connection).catch((error) => {
+      this.logger.warn({ error, botAccountId: connection.botAccountId }, "failed to handle onebot connection recovery");
+    });
 
     socket.on("message", (data) => {
       this.handleSocketMessage(connection, data.toString()).catch((error) => {
@@ -343,9 +428,11 @@ export class OneBotRuntime {
     });
     socket.on("close", () => {
       this.connections.delete(connection);
+      this.noteConnectionUnhealthy(connection, "OneBot WebSocket 连接已断开");
     });
     socket.on("error", (error) => {
       this.logger.warn({ error }, "onebot websocket error");
+      this.noteConnectionUnhealthy(connection, error.message || "OneBot WebSocket 连接异常");
     });
 
     this.logger.info({ botAccountId: connection.botAccountId, tenantId: connection.tenantId, selfId: connection.selfId }, "onebot websocket connected");
@@ -711,30 +798,54 @@ export class OneBotRuntime {
   }
 
   async notifyQZoneCookiesInvalid(botAccountId: string, message: string, options?: { autoRefreshError?: string | null }) {
-    const bot = await prisma.botAccount.findUnique({
-      where: {
-        id: botAccountId,
-      },
-    });
-    if (!bot || !bot.reviewGroupId) {
-      return;
-    }
-    const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, bot.tenantId);
-    await this.sendGroupMessage(
-      bot.qqUin.toString(),
-      bot.reviewGroupId,
-      [
-        formatCookiesInvalid(options?.autoRefreshError, stylishEnabled),
-        `墙号：${bot.displayName} / QQ ${bot.qqUin.toString()}`,
-        `检测结果：${message}`,
-        options?.autoRefreshError ? `自动刷新失败：${options.autoRefreshError}` : null,
-      ].filter((line): line is string => Boolean(line)).join("\n"),
-    ).catch((error) => {
-      this.logger.warn({ error, botQqUin: bot.qqUin.toString(), groupId: bot.reviewGroupId }, "failed to notify qzone cookies invalid");
+    await this.handleQZoneSessionHealth(botAccountId, "invalid", message, {
+      source: "legacy",
+      ...(options?.autoRefreshError === undefined ? {} : { autoRefreshError: options.autoRefreshError }),
     });
   }
 
-  async refreshQZoneCookiesByProtocol(botAccountId: string, reason: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid") {
+  async handleQZoneSessionHealth(
+    botAccountId: string,
+    status: "available" | "invalid" | "unchecked",
+    message: string,
+    options?: { source?: string; autoRefreshError?: string | null },
+  ) {
+    const bot = await prisma.botAccount.findUnique({
+      where: { id: botAccountId },
+      select: { id: true, tenantId: true, platform: true, enabled: true },
+    });
+    if (!bot || bot.platform !== "onebot" || !bot.enabled || status === "unchecked") {
+      return;
+    }
+    if (status === "available") {
+      await resolveBotHealthIncident({
+        tenantId: bot.tenantId,
+        botAccountId: bot.id,
+        kind: "qzone_session",
+        now: new Date(),
+        details: { source: options?.source ?? "health_check" },
+      });
+      await this.flushPendingHealthNotifications(bot.tenantId);
+      return;
+    }
+    await markQZoneSessionInvalidForBot(bot.id, message);
+    await openBotHealthIncident({
+      tenantId: bot.tenantId,
+      botAccountId: bot.id,
+      kind: "qzone_session",
+      reason: options?.autoRefreshError ? `${message}；自动刷新失败：${options.autoRefreshError}` : message,
+      details: {
+        source: options?.source ?? "health_check",
+        ...(options?.autoRefreshError ? { autoRefreshError: options.autoRefreshError } : {}),
+      },
+    });
+    await this.flushPendingHealthNotifications(bot.tenantId);
+  }
+
+  async refreshQZoneCookiesByProtocol(
+    botAccountId: string,
+    reason: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid" | "admin_check" | "review_group_refresh",
+  ) {
     const cachedFailure = this.qzoneProtocolAutoRefreshFailures.get(botAccountId);
     if (cachedFailure) {
       const remainingMs = qzoneProtocolAutoRefreshFailureCooldownMs - (Date.now() - cachedFailure.failedAt);
@@ -758,7 +869,10 @@ export class OneBotRuntime {
     }
   }
 
-  private async doRefreshQZoneCookiesByProtocol(botAccountId: string, reason: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid") {
+  private async doRefreshQZoneCookiesByProtocol(
+    botAccountId: string,
+    reason: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid" | "admin_check" | "review_group_refresh",
+  ) {
     const bot = await prisma.botAccount.findUnique({
       where: {
         id: botAccountId,
@@ -785,6 +899,15 @@ export class OneBotRuntime {
       if (checked?.healthStatus === "invalid") {
         throw new BotWorkflowError(`协议自动刷新后 cookies 仍不可用：${checked.healthMessage ?? "未知错误"}`, 502);
       }
+      if (checked?.healthStatus !== "available") {
+        throw new BotWorkflowError("协议自动刷新后没有拿到可用 cookies", 502);
+      }
+      await this.handleQZoneSessionHealth(
+        bot.id,
+        "available",
+        checked.healthMessage ?? "QZone 登录态已恢复",
+        { source: reason },
+      );
       this.qzoneProtocolAutoRefreshFailures.delete(bot.id);
       await this.notifyQZoneCookiesAutoRefreshed(bot.id, reason, result.cookieNames.length, checked?.healthMessage ?? null);
       await this.resumeWaitingPublishAttemptsForBot(bot.id);
@@ -855,11 +978,466 @@ export class OneBotRuntime {
     return count;
   }
 
-  getBotConnectionStatus(botQqUin: string) {
-    const connections = Array.from(this.connections).filter((connection) => connection.selfId === botQqUin && connection.socket.readyState === 1);
+  /**
+   * 检查所有已经建立过连接的 OneBot。新建但从未连接的 Bot 不会进入监控集合，
+   * 从而避免后台刚创建账号就产生“掉线”告警。
+   */
+  async scanConnectionHealth(now = new Date()) {
+    if (this.connectionHealthRunning) {
+      return;
+    }
+    this.connectionHealthRunning = true;
+    try {
+      // Restore the in-memory watch set after a process restart. `lastSeenAt`
+      // is only written after a successful authenticated OneBot connection,
+      // so newly-created accounts (which have never connected) stay quiet.
+      if (!this.monitoredBotAccountsHydrated) {
+        const previouslySeenBots = await prisma.botAccount.findMany({
+          where: {
+            platform: "onebot",
+            lastSeenAt: { not: null },
+          },
+          select: { id: true },
+        });
+        for (const bot of previouslySeenBots) {
+          this.monitoredBotAccountIds.add(bot.id);
+        }
+        this.monitoredBotAccountsHydrated = true;
+      }
+      const botAccountIds = new Set<string>([
+        ...this.monitoredBotAccountIds,
+        ...Array.from(this.connections, (connection) => connection.botAccountId),
+      ]);
+      for (const botAccountId of botAccountIds) {
+        const bot = await prisma.botAccount.findUnique({
+          where: { id: botAccountId },
+          select: {
+            id: true,
+            tenantId: true,
+            platform: true,
+            enabled: true,
+            displayName: true,
+            qqUin: true,
+            reviewGroupId: true,
+          },
+        });
+        if (!bot || bot.platform !== "onebot" || !bot.enabled) {
+          this.connectionOfflineCandidates.delete(botAccountId);
+          await silentlyResolveBotHealthIncidents({ botAccountId, now });
+          continue;
+        }
+
+        const connections = Array.from(this.connections).filter((connection) => connection.botAccountId === botAccountId);
+        const healthy = connections.some((connection) => this.isHealthyConnection(connection, now.getTime()));
+        if (healthy) {
+          this.connectionOfflineCandidates.delete(botAccountId);
+          await this.resolveConnectionIncidentIfNeeded(bot, now);
+          continue;
+        }
+
+        const candidate = this.connectionOfflineCandidates.get(botAccountId) ?? {
+          botAccountId,
+          botQqUin: bot.qqUin.toString(),
+          tenantId: bot.tenantId,
+          since: now.getTime(),
+          reason: this.readConnectionFailureReason(connections),
+        };
+        this.connectionOfflineCandidates.set(botAccountId, candidate);
+        if (now.getTime() - candidate.since < 30_000) {
+          continue;
+        }
+
+        await openBotHealthIncident({
+          tenantId: bot.tenantId,
+          botAccountId,
+          kind: "onebot_connection",
+          reason: candidate.reason,
+          details: {
+            gracePeriodMs: 30_000,
+            heartbeatTimeoutMs: 60_000,
+            candidateSince: new Date(candidate.since).toISOString(),
+          },
+          now: new Date(candidate.since),
+        });
+      }
+      await this.flushPendingHealthNotifications();
+    } finally {
+      this.connectionHealthRunning = false;
+    }
+  }
+
+  async checkQZoneSessionHealth(
+    sessionId: string,
+    source: "heartbeat_invalid" | "publish_login_required" | "publish_preflight_invalid" | "admin_check" | "review_group_refresh" = "admin_check",
+  ) {
+    return evaluateQZoneSessionHealth(sessionId, this, source);
+  }
+
+  async retryFailedMessages(botAccountId: string) {
+    const count = await this.inboxConsumer.retryFailed(botAccountId);
+    if (count > 0) {
+      await this.consumeBotMessageInbox(botAccountId);
+    }
+    return count;
+  }
+
+  async consumePendingMessageInboxes() {
+    const rows = await prisma.botMessageInbox.findMany({
+      where: {
+        // Include in-flight rows so a process restart can enter the consumer
+        // and release locks left by a crashed worker. The consumer itself
+        // still gates pending rows by availableAt and keeps terminal failures
+        // waiting for an explicit operator retry.
+        status: { in: ["pending", "processing"] },
+      },
+      select: { botAccountId: true },
+    });
+    const botAccountIds = [...new Set(rows.map((row) => row.botAccountId))];
+    await Promise.all(botAccountIds.map((botAccountId) => this.consumeBotMessageInbox(botAccountId)));
+    return botAccountIds.length;
+  }
+
+  async handleBotDisabled(botAccountId: string) {
+    this.mutedBotAccountIds.add(botAccountId);
+    this.connectionOfflineCandidates.delete(botAccountId);
+    for (const connection of this.connections) {
+      if (connection.botAccountId === botAccountId) {
+        connection.socket.close?.(1000, "bot disabled");
+        this.connections.delete(connection);
+      }
+    }
+    return silentlyResolveBotHealthIncidents({ botAccountId });
+  }
+
+  handleBotEnabled(botAccountId: string) {
+    this.mutedBotAccountIds.delete(botAccountId);
+  }
+
+  private isHealthyConnection(connection: OneBotConnection, nowMs = Date.now()) {
+    return connection.socket.readyState === 1
+      && connection.protocolOnline !== false
+      && nowMs - connection.lastHeartbeatAt <= 60_000;
+  }
+
+  private hasHealthyConnection(botAccountId: string, nowMs = Date.now()) {
+    return Array.from(this.connections).some((connection) => connection.botAccountId === botAccountId && this.isHealthyConnection(connection, nowMs));
+  }
+
+  private noteConnectionUnhealthy(connection: OneBotConnection, reason: string) {
+    if (this.mutedBotAccountIds.has(connection.botAccountId)) {
+      return;
+    }
+    // A socket error or protocol lifecycle failure can leave the WebSocket open
+    // for a short period. Mark it unhealthy immediately so the health scan does
+    // not mistake a stale open socket for a live connection.
+    connection.protocolOnline = false;
+    if (this.hasHealthyConnection(connection.botAccountId)) {
+      return;
+    }
+    const existing = this.connectionOfflineCandidates.get(connection.botAccountId);
+    if (existing) {
+      existing.reason = reason || existing.reason;
+      return;
+    }
+    this.connectionOfflineCandidates.set(connection.botAccountId, {
+      botAccountId: connection.botAccountId,
+      botQqUin: connection.selfId ?? "",
+      tenantId: connection.tenantId,
+      since: Date.now(),
+      reason: reason || "OneBot 连接不可用",
+    });
+  }
+
+  private readConnectionFailureReason(connections: OneBotConnection[]) {
+    if (connections.some((connection) => connection.protocolOnline === false)) {
+      return "协议端报告在线状态为离线";
+    }
+    if (connections.length === 0) {
+      return "OneBot WebSocket 连接已断开";
+    }
+    return "OneBot 心跳超过 60 秒未收到";
+  }
+
+  private async handleBotConnectionRecovered(connection: OneBotConnection) {
+    if (connection.socket.readyState !== 1 || connection.protocolOnline === false) {
+      return;
+    }
+    this.connectionOfflineCandidates.delete(connection.botAccountId);
+    const bot = await prisma.botAccount.findUnique({
+      where: { id: connection.botAccountId },
+      select: { id: true, tenantId: true, platform: true, enabled: true, displayName: true, qqUin: true, reviewGroupId: true },
+    });
+    if (!bot || bot.platform !== "onebot" || !bot.enabled) {
+      return;
+    }
+    await this.resolveConnectionIncidentIfNeeded(bot, new Date());
+    await this.flushPendingHealthNotifications(bot.tenantId);
+    await this.consumeBotMessageInbox(connection.botAccountId);
+  }
+
+  private async resolveConnectionIncidentIfNeeded(bot: { id: string; tenantId: string }, now: Date) {
+    const result = await resolveBotHealthIncident({
+      tenantId: bot.tenantId,
+      botAccountId: bot.id,
+      kind: "onebot_connection",
+      now,
+    });
+    return result.incident;
+  }
+
+  private async consumeBotMessageInbox(botAccountId: string) {
+    const bot = await prisma.botAccount.findUnique({
+      where: { id: botAccountId },
+      select: { enabled: true, platform: true },
+    });
+    if (!bot || !bot.enabled || bot.platform !== "onebot") {
+      return 0;
+    }
+    return this.inboxConsumer.consume(
+      botAccountId,
+      async (event) => {
+        const messageEvent = event as OneBotMessageEvent;
+        if (messageEvent.message_type === "private") {
+          await this.handlePrivateMessage(messageEvent);
+        } else if (messageEvent.message_type === "group") {
+          await this.handleGroupMessage(messageEvent);
+        }
+      },
+      async (record, error) => {
+        await this.handleInboxReplayFailed(record, error);
+      },
+    );
+  }
+
+  private async handleInboxReplayFailed(record: { id: string; tenantId: string; botAccountId: string; conversationKey: string; attempts: number }, error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeAuditLog({
+      tenantId: record.tenantId,
+      actorId: null,
+      action: "bot.message.replay_failed",
+      targetType: "bot_message_inbox",
+      targetId: record.id,
+      detail: {
+        botAccountId: record.botAccountId,
+        conversationKey: record.conversationKey,
+        attempts: record.attempts,
+        error: message,
+      },
+    });
+
+    const bot = await prisma.botAccount.findUnique({
+      where: { id: record.botAccountId },
+      select: { id: true, tenantId: true, platform: true, enabled: true, displayName: true, qqUin: true, reviewGroupId: true },
+    });
+    if (!bot || !bot.enabled || bot.platform !== "onebot") {
+      return;
+    }
+    const pendingCount = await prisma.botMessageInbox.count({
+      where: { botAccountId: bot.id, status: { not: "processed" } },
+    });
+    const senders = await this.findHealthNotificationSenders(bot);
+    if (senders.length === 0) {
+      return;
+    }
+    for (const sender of senders) {
+      try {
+        await this.sendGroupMessage(
+          sender.qqUin.toString(),
+          sender.reviewGroupId!,
+          formatBotMessageReplayFailed({
+            botName: bot.displayName,
+            botQqUin: bot.qqUin.toString(),
+            error: message,
+            pendingMessageCount: pendingCount,
+          }),
+        );
+        break;
+      } catch (sendError) {
+        this.logger.warn({ error: sendError, botAccountId: bot.id, senderBotAccountId: sender.id }, "failed to notify bot message replay failure");
+      }
+    }
+  }
+
+  private async flushPendingHealthNotifications(tenantId?: string) {
+    const running = this.healthNotificationFlush;
+    if (running) {
+      await running;
+    }
+    const current = this.flushPendingHealthNotificationsInternal(tenantId);
+    this.healthNotificationFlush = current;
+    try {
+      await current;
+    } finally {
+      if (this.healthNotificationFlush === current) {
+        this.healthNotificationFlush = null;
+      }
+    }
+  }
+
+  private async flushPendingHealthNotificationsInternal(tenantId?: string) {
+    const incidents = await listPendingBotHealthNotifications(tenantId ? { tenantId } : {});
+    for (const incident of incidents) {
+      const bot = await prisma.botAccount.findUnique({
+        where: { id: incident.botAccountId },
+        select: {
+          id: true,
+          tenantId: true,
+          platform: true,
+          enabled: true,
+          displayName: true,
+          qqUin: true,
+          reviewGroupId: true,
+          reviewNotificationEnabled: true,
+          createdAt: true,
+        },
+      });
+      if (!bot || bot.platform !== "onebot") {
+        continue;
+      }
+      if (!bot.enabled) {
+        await silentlyResolveBotHealthIncidents({ botAccountId: bot.id });
+        continue;
+      }
+      const senders = await this.findHealthNotificationSenders(bot);
+      if (senders.length === 0) {
+        continue;
+      }
+      const pendingMessageCount = await prisma.botMessageInbox.count({
+        where: { botAccountId: bot.id, status: { not: "processed" } },
+      });
+      const durationMs = healthIncidentDurationMs(incident);
+      const recovered = Boolean(incident.resolvedAt);
+      const combinedRecovery = recovered && !incident.faultNotifiedAt;
+      const message = incident.kind === "qzone_session"
+        ? (recovered
+            ? formatQZoneSessionRecovered({
+                botName: bot.displayName,
+                botQqUin: bot.qqUin.toString(),
+                reason: incident.reason,
+                startedAt: incident.startedAt,
+                ...(incident.resolvedAt ? { endedAt: incident.resolvedAt } : {}),
+                durationMs,
+                pendingMessageCount,
+                combined: combinedRecovery,
+              })
+            : formatQZoneSessionInvalid({
+                botName: bot.displayName,
+                botQqUin: bot.qqUin.toString(),
+                reason: incident.reason,
+                startedAt: incident.startedAt,
+                pendingMessageCount,
+              }))
+        : (recovered
+            ? formatBotConnectionRecovered({
+                botName: bot.displayName,
+                botQqUin: bot.qqUin.toString(),
+                reason: incident.reason,
+                startedAt: incident.startedAt,
+                ...(incident.resolvedAt ? { endedAt: incident.resolvedAt } : {}),
+                durationMs,
+                pendingMessageCount,
+                combined: combinedRecovery,
+              })
+            : formatBotConnectionOffline({
+                botName: bot.displayName,
+                botQqUin: bot.qqUin.toString(),
+                reason: incident.reason,
+                startedAt: incident.startedAt,
+                pendingMessageCount,
+              }));
+      let sent = false;
+      for (const sender of senders) {
+        try {
+          await this.sendGroupMessage(sender.qqUin.toString(), sender.reviewGroupId!, message);
+          sent = true;
+          break;
+        } catch (error) {
+          this.logger.warn({ error, incidentId: incident.id, botAccountId: bot.id, senderBotAccountId: sender.id }, "failed to send bot health notification");
+        }
+      }
+      if (!sent) {
+        continue;
+      }
+      const notifiedAt = new Date();
+      if (!incident.faultNotifiedAt) {
+        await markBotHealthIncidentFaultNotified(incident.id, notifiedAt);
+      }
+      if (recovered && !incident.recoveryNotifiedAt) {
+        await markBotHealthIncidentRecoveryNotified(incident.id, notifiedAt);
+      }
+    }
+  }
+
+  private async findHealthNotificationSenders(bot: {
+    id: string;
+    tenantId: string;
+    reviewGroupId: string | null;
+    enabled: boolean;
+    platform: string;
+    reviewNotificationEnabled?: boolean;
+    createdAt?: Date;
+  }) {
+    const bots = await prisma.botAccount.findMany({
+      where: {
+        tenantId: bot.tenantId,
+        platform: "onebot",
+        enabled: true,
+        reviewGroupId: { not: null },
+      },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        tenantId: true,
+        qqUin: true,
+        reviewGroupId: true,
+        reviewNotificationEnabled: true,
+        enabled: true,
+        createdAt: true,
+      },
+    });
+    const online = bots.filter((candidate) => this.getBotConnectionStatus(candidate.qqUin.toString(), candidate.id).online);
+    if (online.length === 0) {
+      return [];
+    }
+    const ordered: typeof online = [];
+    const add = (candidate: (typeof online)[number] | null | undefined) => {
+      if (candidate && !ordered.some((item) => item.id === candidate.id)) {
+        ordered.push(candidate);
+      }
+    };
+    add(online.find((candidate) => candidate.id === bot.id));
+    if (bot.reviewGroupId) {
+      for (const candidate of online) {
+        if (candidate.id !== bot.id && candidate.reviewGroupId === bot.reviewGroupId) {
+          add(candidate);
+        }
+      }
+    }
+    add(selectReviewNotificationBot(online));
+    return ordered;
+  }
+
+  getBotConnectionStatus(botQqUin: string, botAccountId?: string) {
+    const connections = Array.from(this.connections).filter((connection) => (
+      connection.selfId === botQqUin
+      && (!botAccountId || connection.botAccountId === botAccountId)
+      && connection.socket.readyState === 1
+    ));
+    const now = Date.now();
+    const healthyConnections = connections.filter((connection) => this.isHealthyConnection(connection, now));
+    const candidate = [...this.connectionOfflineCandidates.values()].find((item) => (
+      item.botQqUin === botQqUin && (!botAccountId || item.botAccountId === botAccountId)
+    ));
+    const graceEndsAt = candidate ? new Date(candidate.since + 30_000).toISOString() : null;
     return {
-      online: connections.length > 0,
+      online: healthyConnections.length > 0,
       connectionCount: connections.length,
+      healthyConnectionCount: healthyConnections.length,
+      lastHeartbeatAt: connections.reduce<number | null>((latest, connection) => Math.max(latest ?? 0, connection.lastHeartbeatAt), null)
+        ?? (botAccountId ? this.lastHeartbeatAtByBotAccountId.get(botAccountId) ?? null : null),
+      status: healthyConnections.length > 0 ? "online" : candidate && now - candidate.since < 30_000 ? "reconnecting" : "offline",
+      reconnectGraceEndsAt: graceEndsAt,
+      offlineSince: candidate ? new Date(candidate.since).toISOString() : null,
     };
   }
 
@@ -887,7 +1465,7 @@ export class OneBotRuntime {
       },
     });
     for (const bot of bots) {
-      const status = this.getBotConnectionStatus(bot.qqUin.toString());
+      const status = this.getBotConnectionStatus(bot.qqUin.toString(), bot.id);
       if (!status.online) {
         continue;
       }
@@ -1035,6 +1613,11 @@ export class OneBotRuntime {
       return;
     }
 
+    if ((event as OneBotMessageEvent).post_type === "meta_event") {
+      this.handleMetaEvent(connection, event as OneBotMessageEvent);
+      return;
+    }
+
     if ((event as OneBotMessageEvent).post_type === "notice") {
       this.handlePrivateInputStatusEvent(event as OneBotMessageEvent);
       return;
@@ -1045,12 +1628,86 @@ export class OneBotRuntime {
     }
 
     const messageEvent = event as OneBotMessageEvent;
-    if (messageEvent.message_type === "private") {
-      await this.handlePrivateMessage(messageEvent);
+    if (messageEvent.message_type !== "private" && messageEvent.message_type !== "group") {
+      return;
     }
-    if (messageEvent.message_type === "group") {
-      await this.handleGroupMessage(messageEvent);
+    const bot = await prisma.botAccount.findUnique({
+      where: { id: connection.botAccountId },
+      select: { reviewGroupId: true },
+    });
+    if (!shouldPersistBotMessageEvent(messageEvent as BotInboxMessageEvent, bot?.reviewGroupId)) {
+      return;
     }
+    await enqueueBotMessageInbox({
+      tenantId: connection.tenantId,
+      botAccountId: connection.botAccountId,
+      event: messageEvent as BotInboxMessageEvent,
+    });
+    await this.consumeBotMessageInbox(connection.botAccountId);
+  }
+
+  private handleMetaEvent(connection: OneBotConnection, event: OneBotMessageEvent) {
+    const metaType = String(event.meta_event_type ?? "").toLowerCase();
+    const subType = String(event.sub_type ?? "").toLowerCase();
+    let shouldRecover = false;
+    if (metaType === "heartbeat" || metaType === "lifecycle") {
+      this.recordConnectionHeartbeat(connection);
+    }
+    if (metaType === "lifecycle" && /(?:disconnect|offline|disable|close|error)/.test(subType)) {
+      connection.protocolOnline = false;
+      this.noteConnectionUnhealthy(connection, `协议端生命周期事件：${event.sub_type}`);
+    }
+    if (metaType === "lifecycle" && /(?:connect|online|enable|open)/.test(subType)) {
+      connection.protocolOnline = true;
+      shouldRecover = true;
+    }
+    if (metaType === "heartbeat") {
+      // A heartbeat itself proves the protocol connection is alive. An explicit
+      // `status.online/good=false` below still overrides this optimistic state.
+      connection.protocolOnline = true;
+      shouldRecover = true;
+    }
+    const status = event.status;
+    if (status && typeof status === "object") {
+      this.recordConnectionHeartbeat(connection);
+      const online = (status as { online?: unknown }).online;
+      const good = (status as { good?: unknown }).good;
+      const normalizedOnline = typeof online === "boolean"
+        ? online
+        : online === 1 || online === "1" || (typeof online === "string" && ["true", "online", "on"].includes(online.toLowerCase()))
+          ? true
+          : online === 0 || online === "0" || (typeof online === "string" && ["false", "offline", "off"].includes(online.toLowerCase()))
+            ? false
+            : null;
+      const normalizedGood = typeof good === "boolean"
+        ? good
+        : good === 1 || good === "1" || (typeof good === "string" && ["true", "good", "ok"].includes(good.toLowerCase()))
+          ? true
+          : good === 0 || good === "0" || (typeof good === "string" && ["false", "bad", "offline", "off"].includes(good.toLowerCase()))
+            ? false
+            : null;
+      if (normalizedOnline === false || normalizedGood === false) {
+        connection.protocolOnline = false;
+        this.noteConnectionUnhealthy(
+          connection,
+          normalizedOnline === false ? "协议端报告在线状态为离线" : "协议端报告心跳状态异常",
+        );
+        shouldRecover = false;
+      } else if (normalizedOnline === true || normalizedGood === true) {
+        connection.protocolOnline = true;
+        shouldRecover = true;
+      }
+    }
+    if (shouldRecover) {
+      this.handleBotConnectionRecovered(connection).catch((error) => {
+        this.logger.warn({ error, botAccountId: connection.botAccountId }, "failed to handle onebot lifecycle recovery");
+      });
+    }
+  }
+
+  private recordConnectionHeartbeat(connection: OneBotConnection, at = Date.now()) {
+    connection.lastHeartbeatAt = at;
+    this.lastHeartbeatAtByBotAccountId.set(connection.botAccountId, at);
   }
 
   private handlePrivateInputStatusEvent(event: OneBotMessageEvent) {
@@ -1680,6 +2337,10 @@ export class OneBotRuntime {
       await this.sendPrivateMessage(botQqUin, userQqUin, formatConfiguredPrivateHelp(bot.userMessageReply, generalStylishEnabled));
     } catch (error) {
       await this.sendPrivateMessage(botQqUin, userQqUin, toErrorMessage(error)).catch(() => undefined);
+      // Let the persistent inbox apply its retry/backoff policy. The user-facing
+      // error reply above is best-effort and must not turn a failed event into a
+      // falsely processed record.
+      throw error;
     }
   }
 
@@ -2811,7 +3472,7 @@ export class OneBotRuntime {
         userId: access.operator.id,
         operatorId: access.operator.id,
         reason: injectionResult.reason,
-        onBan: async (userId, allTenantIds, endsAt) => {
+        onBan: async (userId, _tenantIds, endsAt) => {
           const user = await prisma.user.findUnique({ where: { id: userId } });
           if (!user) return;
           const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId } });
@@ -3168,6 +3829,12 @@ export class OneBotRuntime {
           rawCookies,
         });
         const checked = await checkAndUpdateQZoneSession(result.session.id);
+        await this.handleQZoneSessionHealth(
+          result.bot.id,
+          checked?.healthStatus === "available" ? "available" : "invalid",
+          checked?.healthMessage ?? "QZone cookies 检测失败",
+          { source: "review_group_refresh" },
+        );
         if (checked?.healthStatus === "available") {
           await this.resumeWaitingPublishAttemptsForBot(result.bot.id);
         }
@@ -3210,6 +3877,14 @@ export class OneBotRuntime {
               },
             });
             const checked = session ? await checkAndUpdateQZoneSession(session.id) : null;
+            if (checked) {
+              await this.handleQZoneSessionHealth(
+                bot.id,
+                checked.healthStatus === "available" ? "available" : "invalid",
+                checked.healthMessage ?? "QZone cookies 检测失败",
+                { source: "review_group_refresh" },
+              );
+            }
             if (checked?.healthStatus === "available") {
               await this.resumeWaitingPublishAttemptsForBot(bot.id);
             }
@@ -3309,50 +3984,39 @@ export class OneBotRuntime {
           await this.sendGroupMessage(botQqUin, groupId, `未找到 QQ ${parsed.qqUin} 对应的账号，请先让该账号通过 Bot 注册或由运维创建`);
           return;
         }
-        const membership = await prisma.tenantMembership.findUnique({
-          where: {
-            tenantId_userId: {
-              tenantId: bot.tenantId,
-              userId: targetUser.id,
-            },
-          },
-        });
-        if (!membership) {
-          await this.sendGroupMessage(botQqUin, groupId, "该用户不属于当前校园墙");
-          return;
-        }
-        if (membership.role === "admin") {
-          await this.sendGroupMessage(botQqUin, groupId, "不能封禁管理员");
-          return;
-        }
         const endsAt = new Date(PERMANENT_BAN_ENDS_AT);
-        await prisma.banRecord.create({
-          data: {
+        let result;
+        try {
+          result = await upsertBanRecord({
             tenantId: bot.tenantId,
             userId: targetUser.id,
             operatorId: operator.id,
             comment: parsed.reason,
             endsAt,
-          },
-        });
-        await writeAuditLog({
-          tenantId: bot.tenantId,
-          actorId: operator.id,
-          action: "ban.create",
-          targetType: "user",
-          targetId: targetUser.id,
-          detail: {
-            comment: parsed.reason,
-            endsAt: endsAt.toISOString(),
             source: "review_group",
-          },
-        });
-        await this.sendGroupMessage(botQqUin, groupId, `已封禁 QQ ${parsed.qqUin}，理由：${parsed.reason}`);
-        const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId } });
-        const tenantName = tenant?.name ?? "校园墙";
-        await this.sendPrivateMessageViaTenantBots(bot.tenantId, parsed.qqUin, formatBanNotify(tenantName, parsed.reason, endsAt)).catch((error) => {
-          this.logger.warn({ error, qqUin: parsed.qqUin }, "failed to send ban notification");
-        });
+          });
+        } catch (error) {
+          const response = banManagementErrorResponse(error);
+          if (response) {
+            await this.sendGroupMessage(botQqUin, groupId, response.message);
+            return;
+          }
+          throw error;
+        }
+        await this.sendGroupMessage(
+          botQqUin,
+          groupId,
+          result.action === "created"
+            ? `已封禁 QQ ${parsed.qqUin}，理由：${parsed.reason}`
+            : `已更新 QQ ${parsed.qqUin} 的封禁信息，理由：${parsed.reason}`,
+        );
+        if (result.action === "created") {
+          const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId } });
+          const tenantName = tenant?.name ?? "校园墙";
+          await this.sendPrivateMessageViaTenantBots(bot.tenantId, parsed.qqUin, formatBanNotify(tenantName, parsed.reason, endsAt)).catch((error) => {
+            this.logger.warn({ error, qqUin: parsed.qqUin }, "failed to send ban notification");
+          });
+        }
         return;
       }
 
@@ -3371,22 +4035,26 @@ export class OneBotRuntime {
           await this.sendGroupMessage(botQqUin, groupId, formatUnbanNotFound(qqUin, stylishEnabled));
           return;
         }
-        const activeBan = await findActiveBan(bot.tenantId, targetUser.id);
-        if (!activeBan) {
+        let result;
+        try {
+          result = await endActiveBanRecords({
+            tenantId: bot.tenantId,
+            userId: targetUser.id,
+            operatorId: operator.id,
+            source: "review_group",
+          });
+        } catch (error) {
+          const response = banManagementErrorResponse(error);
+          if (response) {
+            await this.sendGroupMessage(botQqUin, groupId, response.message);
+            return;
+          }
+          throw error;
+        }
+        if (!result.ended) {
           await this.sendGroupMessage(botQqUin, groupId, formatUnbanNotFound(qqUin, stylishEnabled));
           return;
         }
-        await prisma.banRecord.update({
-          where: { id: activeBan.id },
-          data: { endsAt: new Date() },
-        });
-        await writeAuditLog({
-          tenantId: bot.tenantId,
-          actorId: operator.id,
-          action: "ban.unban",
-          targetType: "user",
-          targetId: targetUser.id,
-        });
         await this.sendGroupMessage(botQqUin, groupId, formatUnbanSuccess(qqUin, stylishEnabled));
         // 发私信通知用户已解封
         const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId } });
@@ -3449,6 +4117,9 @@ export class OneBotRuntime {
       await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
     } catch (error) {
       await this.sendGroupMessage(botQqUin, groupId, toErrorMessage(error)).catch(() => undefined);
+      // Keep the event pending/failed in the inbox so transient protocol or DB
+      // errors are retried instead of being acknowledged as handled.
+      throw error;
     }
   }
 
@@ -3940,12 +4611,17 @@ export class OneBotRuntime {
   }
 
   private findConnection(botQqUin: string) {
-    for (const connection of this.connections) {
-      if (connection.selfId === botQqUin && connection.socket.readyState === 1) {
-        return connection;
+    const candidates = Array.from(this.connections).filter((connection) => (
+      connection.selfId === botQqUin && connection.socket.readyState === 1
+    ));
+    candidates.sort((left, right) => {
+      const healthyDelta = Number(this.isHealthyConnection(right)) - Number(this.isHealthyConnection(left));
+      if (healthyDelta !== 0) {
+        return healthyDelta;
       }
-    }
-    return null;
+      return right.lastHeartbeatAt - left.lastHeartbeatAt || right.connectedAt - left.connectedAt;
+    });
+    return candidates[0] ?? null;
   }
 
   private async authenticateConnection(request: { headers: Record<string, string | string[] | undefined>; url?: string }) {
@@ -3961,6 +4637,7 @@ export class OneBotRuntime {
         id: botId,
         connectionToken: token,
         enabled: true,
+        platform: "onebot",
       },
       select: {
         id: true,

@@ -1,6 +1,6 @@
 import { URL } from "node:url";
 import { FONT_OPTIONS, isDefaultFont } from "@campux/domain";
-import { prisma } from "./prisma";
+export { createAutoBan } from "./ban-management";
 
 // ── 允许的背景色名称 ──────────────────────────────────
 const ALLOWED_BG_COLORS = new Set([
@@ -370,54 +370,4 @@ export function sanitizeTextForStorage(text: string): string {
  */
 export function stripZeroWidthChars(text: string): string {
   return text.replace(/\p{Cf}/gu, "");
-}
-
-// ── 自动封禁 ──────────────────────────────────────────
-
-const BAN_DURATION_MS = 24 * 60 * 60 * 1000; // 1 天
-
-/**
- * 封禁账号：为该用户所有已加入的校园墙创建封禁记录。
- * 这确保用户在所有校园墙内都无法操作（全局封禁账号）。
- */
-export async function createAutoBan({
-  tenantId,
-  userId,
-  operatorId,
-  reason,
-  onBan,
-}: {
-  tenantId: string;
-  userId: string;
-  operatorId?: string;
-  reason: string;
-  onBan?: (userId: string, allTenantIds: string[], endsAt: Date) => Promise<void>;
-}): Promise<void> {
-  const endsAt = new Date(Date.now() + BAN_DURATION_MS);
-
-  // 查出该用户所有已加入的校园墙
-  const memberships = await prisma.tenantMembership.findMany({
-    where: { userId },
-    select: { tenantId: true },
-  });
-
-  const allTenantIds = [
-    ...new Set([tenantId, ...memberships.map((m) => m.tenantId)]),
-  ];
-
-  // 为每个校园墙创建封禁记录
-  await prisma.banRecord.createMany({
-    data: allTenantIds.map((tid) => ({
-      tenantId: tid,
-      userId,
-      operatorId: operatorId ?? null,
-      comment: `自动封禁（24小时）：${reason}`,
-      endsAt,
-    })),
-  });
-
-  // 封禁后回调（用于发送通知等）
-  if (onBan) {
-    await onBan(userId, allTenantIds, endsAt).catch(() => undefined);
-  }
 }

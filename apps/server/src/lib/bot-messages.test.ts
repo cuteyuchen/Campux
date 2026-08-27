@@ -139,7 +139,9 @@ describe("bot registration messages", () => {
     expect(message).toContain("投稿：开始对话投稿");
     expect(message).toContain("稿件：查看最近 5 条投稿");
     expect(message).toContain("撤回：查看可处理稿件");
-    expect(message).toContain("撤回+编号+理由");
+    expect(message).toContain("撤回 编号 [理由]");
+    expect(message).toContain("撤回 12 内容有误");
+    expect(message).not.toContain("撤回+编号+理由");
     expect(message).toContain("重置密码：重置登录密码");
     expect(message).toContain("匿名、实名、撤回上一条、结束、确认、取消");
     expect(message).toContain("网页登录账号是你的 QQ 号");
@@ -228,7 +230,9 @@ describe("bot private post messages", () => {
     ]);
     expect(message).toContain("#12｜已发布");
     expect(message).toContain("#11｜待审核");
-    expect(message).toContain("撤回123");
+    expect(message).toContain("撤回 编号");
+    expect(message).toContain("撤回 12 内容有误");
+    expect(message).not.toContain("撤回123");
   });
 
   test("formats withdrawal candidates and asks for an id plus reason", () => {
@@ -238,8 +242,9 @@ describe("bot private post messages", () => {
     ]);
     expect(message).toContain("#12｜已发布");
     expect(message).toContain("#11｜待审核");
-    expect(message).toContain("撤回+编号+理由");
-    expect(message).toContain("撤回12 内容有误");
+    expect(message).toContain("撤回 编号 [理由]");
+    expect(message).toContain("撤回 12 内容有误");
+    expect(message).not.toContain("撤回+编号+理由");
   });
 
   test("recall request notification explains quoted approve and reject commands", () => {

@@ -152,7 +152,8 @@ export function parsePrivatePostManagementCommand(input: string): PrivatePostMan
     return { name: "withdraw_list" };
   }
 
-  const withdraw = normalized.match(/^(?:#|＃|\/)?\s*撤回\s*#?(\d+)(?:\s+([\s\S]*\S))?\s*$/);
+  // 编号后的空格可省略，兼容“撤回12有误”这类常见输入。
+  const withdraw = normalized.match(/^(?:#|＃|\/)?\s*撤回\s*#?(\d+)(?:\s*([\s\S]*\S))?\s*$/);
   if (!withdraw?.[1]) {
     return null;
   }

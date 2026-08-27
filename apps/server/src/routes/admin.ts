@@ -22,6 +22,11 @@ import { pollQZoneQrLogin, startQZoneQrLogin } from "../lib/qzone-login";
 import { formatBanNotify, formatUnbanNotify } from "../lib/bot-messages";
 import { listOfficialQqChannels, listOfficialQqGuilds } from "../runtime/official-qq";
 import { BotWorkflowError } from "../lib/bot-workflows";
+import {
+  banManagementErrorResponse,
+  endActiveBanRecords,
+  upsertBanRecord,
+} from "../lib/ban-management";
 
 const roleSchema = z.enum(["submitter", "reviewer", "admin"]);
 
@@ -197,6 +202,11 @@ const banQuerySchema = z.object({
   q: z.string().max(80).optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(50).default(10),
+});
+
+const banCandidateQuerySchema = z.object({
+  q: z.string().trim().max(80).default(""),
+  limit: z.coerce.number().int().min(1).max(30).default(20),
 });
 
 const banCreateSchema = z.object({
@@ -492,6 +502,78 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
     };
   });
 
+  app.get("/api/admin/ban-candidates", async (request, reply) => {
+    const context = await requireTenantRole(request, reply, "admin");
+    const query = banCandidateQuerySchema.parse(request.query);
+    const searchWhere = query.q ? await buildUserContainsSearch(query.q) : null;
+    const members = await prisma.tenantMembership.findMany({
+      where: {
+        tenantId: context.selectedTenant.id,
+        ...(searchWhere ? { user: searchWhere } : {}),
+      },
+      include: {
+        user: true,
+      },
+      orderBy: [
+        { user: { displayName: "asc" } },
+        { user: { qqUin: "asc" } },
+        { id: "asc" },
+      ],
+      take: query.limit,
+    });
+
+    const now = new Date();
+    const activeBans = members.length === 0
+      ? []
+      : await prisma.banRecord.findMany({
+          where: {
+            tenantId: context.selectedTenant.id,
+            userId: {
+              in: members.map((member) => member.userId),
+            },
+            endsAt: {
+              gt: now,
+            },
+          },
+          orderBy: [
+            { startsAt: "asc" },
+            { createdAt: "asc" },
+            { id: "asc" },
+          ],
+        });
+    const bansByUserId = new Map<string, typeof activeBans>();
+    for (const ban of activeBans) {
+      const userBans = bansByUserId.get(ban.userId) ?? [];
+      userBans.push(ban);
+      bansByUserId.set(ban.userId, userBans);
+    }
+
+    return {
+      candidates: members.map((member) => {
+        const userBans = bansByUserId.get(member.userId) ?? [];
+        const activeBan = userBans[0] ?? null;
+        return {
+          user: {
+            id: member.user.id,
+            qqUin: member.user.qqUin.toString(),
+            displayName: member.user.displayName,
+          },
+          role: member.role,
+          selectable: member.role !== "admin",
+          activeBan: activeBan
+            ? {
+                id: activeBan.id,
+                comment: activeBan.comment,
+                startsAt: activeBan.startsAt.toISOString(),
+                endsAt: activeBan.endsAt.toISOString(),
+              }
+            : null,
+          activeBanCount: userBans.length,
+        };
+      }),
+    };
+  });
+
   app.get("/api/admin/ban-records", async (request, reply) => {
     const context = await requireTenantRole(request, reply, "admin");
     const query = banQuerySchema.parse(request.query);
@@ -535,50 +617,34 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
       return reply.code(404).send({ message: "用户不存在" });
     }
 
-    const membership = await prisma.tenantMembership.findUnique({
-      where: {
-        tenantId_userId: {
-          tenantId: context.selectedTenant.id,
-          userId: user.id,
-        },
-      },
-    });
-    if (!membership) {
-      return reply.code(404).send({ message: "该用户不属于当前校园墙" });
-    }
-    if (membership.role === "admin") {
-      return reply.code(409).send({ message: "不能封禁管理员" });
-    }
-
-    const ban = await prisma.banRecord.create({
-      data: {
+    let result;
+    try {
+      result = await upsertBanRecord({
         tenantId: context.selectedTenant.id,
         userId: user.id,
         operatorId: context.user.id,
         comment: body.comment,
         endsAt,
-      },
-    });
+        source: "admin_web",
+      });
+    } catch (error) {
+      const response = banManagementErrorResponse(error);
+      if (response) {
+        return reply.code(response.statusCode).send({ message: response.message });
+      }
+      throw error;
+    }
 
-    await writeAuditLog({
-      tenantId: context.selectedTenant.id,
-      actorId: context.user.id,
-      action: "ban.create",
-      targetType: "user",
-      targetId: user.id,
-      detail: {
-        comment: body.comment,
-        endsAt: endsAt.toISOString(),
-      },
-    });
-
-    // 发私信通知用户被封禁
-    oneBot?.sendPrivateMessageViaTenantBots(context.selectedTenant.id, user.qqUin.toString(), formatBanNotify(context.selectedTenant.name, body.comment, endsAt)).catch((notifyErr) => {
-      app.log.warn({ error: notifyErr }, "failed to send ban notification");
-    });
+    if (result.action === "created") {
+      // 只有首次创建封禁时发私信，续期/修改不重复打扰用户。
+      oneBot?.sendPrivateMessageViaTenantBots(context.selectedTenant.id, user.qqUin.toString(), formatBanNotify(context.selectedTenant.name, body.comment, endsAt)).catch((notifyErr) => {
+        app.log.warn({ error: notifyErr }, "failed to send ban notification");
+      });
+    }
 
     return {
-      ban: (await toBanRecords([ban]))[0],
+      action: result.action,
+      ban: (await toBanRecords([result.ban]))[0],
     };
   });
 
@@ -595,22 +661,24 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
       return reply.code(404).send({ message: "封禁记录不存在" });
     }
 
-    const updated = await prisma.banRecord.update({
-      where: {
-        id: ban.id,
-      },
-      data: {
-        endsAt: new Date(),
-      },
-    });
-
-    await writeAuditLog({
-      tenantId: context.selectedTenant.id,
-      actorId: context.user.id,
-      action: "ban.unban",
-      targetType: "user",
-      targetId: ban.userId,
-    });
+    let result;
+    try {
+      result = await endActiveBanRecords({
+        tenantId: context.selectedTenant.id,
+        userId: ban.userId,
+        operatorId: context.user.id,
+        source: "admin_web",
+      });
+    } catch (error) {
+      const response = banManagementErrorResponse(error);
+      if (response) {
+        return reply.code(response.statusCode).send({ message: response.message });
+      }
+      throw error;
+    }
+    if (!result.ended || !result.ban) {
+      return reply.code(409).send({ message: "该用户当前没有生效封禁" });
+    }
 
     // 发私信通知用户已解封
     const targetUser = await prisma.user.findUnique({ where: { id: ban.userId } });
@@ -621,7 +689,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
     }
 
     return {
-      ban: (await toBanRecords([updated]))[0],
+      ban: (await toBanRecords([result.ban]))[0],
     };
   });
 
@@ -674,10 +742,90 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
       take: 30,
     });
 
+    const [healthIncidents, inboxRows] = await Promise.all([
+      prisma.botHealthIncident.findMany({
+        where: {
+          tenantId: context.selectedTenant.id,
+          resolvedAt: null,
+        },
+        orderBy: { startedAt: "asc" },
+      }),
+      prisma.botMessageInbox.findMany({
+        where: {
+          tenantId: context.selectedTenant.id,
+          status: { not: "processed" },
+        },
+        select: {
+          botAccountId: true,
+          status: true,
+          lastError: true,
+          updatedAt: true,
+        },
+        orderBy: { updatedAt: "desc" },
+      }),
+    ]);
+    const incidentsByBot = new Map<string, typeof healthIncidents>();
+    for (const incident of healthIncidents) {
+      const list = incidentsByBot.get(incident.botAccountId) ?? [];
+      list.push(incident);
+      incidentsByBot.set(incident.botAccountId, list);
+    }
+    const inboxByBot = new Map<string, typeof inboxRows>();
+    for (const row of inboxRows) {
+      const list = inboxByBot.get(row.botAccountId) ?? [];
+      list.push(row);
+      inboxByBot.set(row.botAccountId, list);
+    }
+
     return {
-      bots: bots.map((bot) => toBotAccount(bot, bot.platform === "official_qq" ? { online: bot.enabled, connectionCount: bot.enabled ? 1 : 0 } : oneBot?.getBotConnectionStatus(bot.qqUin.toString()))),
+      bots: bots.map((bot) => {
+        const connection = bot.platform === "official_qq"
+          ? { online: bot.enabled, connectionCount: bot.enabled ? 1 : 0 }
+          : oneBot?.getBotConnectionStatus(bot.qqUin.toString(), bot.id);
+        const rows = inboxByBot.get(bot.id) ?? [];
+        const incidents = incidentsByBot.get(bot.id) ?? [];
+        const latestError = rows.find((row) => row.lastError)?.lastError
+          ?? incidents[0]?.reason
+          ?? bot.sessions.find((session) => session.healthStatus === "invalid")?.healthMessage
+          ?? null;
+        return toBotAccount(bot, connection, {
+          activeIncidents: incidents.map((incident) => ({
+            id: incident.id,
+            kind: incident.kind,
+            startedAt: incident.startedAt.toISOString(),
+            reason: incident.reason,
+          })),
+          pendingMessageCount: rows.filter((row) => row.status !== "failed").length,
+          failedMessageCount: rows.filter((row) => row.status === "failed").length,
+          latestError,
+          lastHeartbeatAt: connection && "lastHeartbeatAt" in connection && typeof connection.lastHeartbeatAt === "number"
+            ? new Date(connection.lastHeartbeatAt).toISOString()
+            : null,
+        });
+      }),
       events: auditLogs.map(toTenantBotEvent),
     };
+  });
+
+  app.post("/api/admin/bots/:id/message-inbox/retry-failed", async (request, reply) => {
+    const context = await requireTenantRole(request, reply, "admin");
+    const params = botParamsSchema.parse(request.params);
+    const bot = await prisma.botAccount.findFirst({
+      where: {
+        id: params.id,
+        tenantId: context.selectedTenant.id,
+        platform: "onebot",
+      },
+      select: { id: true },
+    });
+    if (!bot) {
+      return reply.code(404).send({ message: "OneBot 机器人不存在" });
+    }
+    if (!oneBot) {
+      return reply.code(503).send({ message: "OneBot 运行时不可用" });
+    }
+    const count = await oneBot.retryFailedMessages(bot.id);
+    return { count };
   });
 
   app.post("/api/admin/official-qq/discovery", async (request, reply) => {
@@ -848,7 +996,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
     });
 
     return {
-      bot: toBotAccount(bot, oneBot?.getBotConnectionStatus(bot.qqUin.toString())),
+      bot: toBotAccount(bot, oneBot?.getBotConnectionStatus(bot.qqUin.toString(), bot.id)),
     };
   });
 
@@ -909,6 +1057,12 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
       });
     });
 
+    if (body.enabled === false) {
+      await oneBot?.handleBotDisabled(bot.id);
+    } else if (body.enabled === true) {
+      oneBot?.handleBotEnabled(bot.id);
+    }
+
     await writeAuditLog({
       tenantId: context.selectedTenant.id,
       actorId: context.user.id,
@@ -919,7 +1073,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
     });
 
     return {
-      bot: toBotAccount(updated, updated.platform === "official_qq" ? { online: updated.enabled, connectionCount: updated.enabled ? 1 : 0 } : oneBot?.getBotConnectionStatus(updated.qqUin.toString())),
+      bot: toBotAccount(updated, updated.platform === "official_qq" ? { online: updated.enabled, connectionCount: updated.enabled ? 1 : 0 } : oneBot?.getBotConnectionStatus(updated.qqUin.toString(), updated.id)),
     };
   });
 
@@ -949,6 +1103,12 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
       rawCookies,
     });
     const checked = await checkAndUpdateQZoneSession(result.session.id);
+    await oneBot?.handleQZoneSessionHealth(
+      result.bot.id,
+      checked?.healthStatus === "available" ? "available" : "invalid",
+      checked?.healthMessage ?? "QZone cookies 检测失败",
+      { source: "admin_refresh" },
+    );
     if (checked?.healthStatus === "available") {
       await resumePublishAttemptsWaitingForCookies(queue, bot.id, app.log);
     }
@@ -977,7 +1137,9 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
       return reply.code(404).send({ message: "这个 Bot 还没有 QZone cookies" });
     }
 
-    const updated = await checkAndUpdateQZoneSession(session.id);
+    const updated = oneBot
+      ? await oneBot.checkQZoneSessionHealth(session.id, "admin_check")
+      : await checkAndUpdateQZoneSession(session.id);
     if (updated?.healthStatus === "available") {
       await resumePublishAttemptsWaitingForCookies(queue, params.id, app.log);
     }
@@ -1042,8 +1204,15 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
   });
 
   app.get("/api/admin/bots/:id/qzone-login/:loginId", async (request, reply) => {
-    await requireTenantRole(request, reply, "admin");
+    const context = await requireTenantRole(request, reply, "admin");
     const params = botLoginParamsSchema.parse(request.params);
+    const bot = await prisma.botAccount.findFirst({
+      where: { id: params.id, tenantId: context.selectedTenant.id },
+      select: { id: true },
+    });
+    if (!bot) {
+      return reply.code(404).send({ message: "Bot 账号不存在" });
+    }
     const result = await pollQZoneQrLogin(params.loginId);
     if (result.status === "succeeded") {
       const session = await prisma.botSession.findFirst({
@@ -1057,6 +1226,12 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
         },
       });
       const checked = session ? await checkAndUpdateQZoneSession(session.id) : null;
+      await oneBot?.handleQZoneSessionHealth(
+        bot.id,
+        checked?.healthStatus === "available" ? "available" : "invalid",
+        checked?.healthMessage ?? "QZone cookies 检测失败",
+        { source: "admin_qr_login" },
+      );
       if (checked?.healthStatus === "available") {
         await resumePublishAttemptsWaitingForCookies(queue, params.id, app.log);
       }
@@ -1079,6 +1254,12 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
 
     if (!bot) {
       return reply.code(404).send({ message: "机器人不存在" });
+    }
+
+    // Close an active OneBot connection before the account and its inbox rows
+    // are removed, so a late protocol event cannot write against a deleted bot.
+    if (bot.platform === "onebot") {
+      await oneBot?.handleBotDisabled(bot.id);
     }
 
     await prisma.botAccount.delete({
@@ -1528,7 +1709,22 @@ function toBotAccount(
       type: string;
     }>;
   },
-  connection: { online: boolean; connectionCount: number } | undefined,
+  connection: {
+    online: boolean;
+    connectionCount: number;
+    healthyConnectionCount?: number;
+    lastHeartbeatAt?: number | null;
+    status?: string;
+    reconnectGraceEndsAt?: string | null;
+    offlineSince?: string | null;
+  } | undefined,
+  monitoring?: {
+    activeIncidents: Array<{ id: string; kind: string; startedAt: string; reason: string }>;
+    pendingMessageCount: number;
+    failedMessageCount: number;
+    latestError: string | null;
+    lastHeartbeatAt: string | null;
+  },
 ) {
   return {
     id: bot.id,
@@ -1554,6 +1750,12 @@ function toBotAccount(
       online: false,
       connectionCount: 0,
     },
+    activeIncidents: monitoring?.activeIncidents ?? [],
+    activeIncident: monitoring?.activeIncidents[0] ?? null,
+    pendingMessageCount: monitoring?.pendingMessageCount ?? 0,
+    failedMessageCount: monitoring?.failedMessageCount ?? 0,
+    latestError: monitoring?.latestError ?? null,
+    lastHeartbeatAt: monitoring?.lastHeartbeatAt ?? (connection?.lastHeartbeatAt ? new Date(connection.lastHeartbeatAt).toISOString() : null),
     sessions: bot.sessions.map(toBotSession),
     publishTargets: bot.publishTargets.map((target) => ({
       id: target.id,

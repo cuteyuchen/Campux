@@ -8,7 +8,7 @@ import { qzoneCookieDomain } from "../lib/bot-workflows";
 import { serializeAssignedPostTags } from "../lib/post-tags";
 import { prisma } from "../lib/prisma";
 import { decryptJson } from "../lib/secret-json";
-import { checkAndUpdateQZoneSession } from "../lib/qzone-cookies";
+import { checkAndUpdateQZoneSession, markQZoneSessionInvalidForBot } from "../lib/qzone-cookies";
 import { isQZoneProtocolAutoRefreshCooldownError } from "../lib/qzone-auto-refresh";
 import { BATCH_CAPTION_SEPARATOR_LLM, BATCH_CAPTION_SEPARATOR_PLAIN, joinBatchCaptions } from "./publish-batching";
 import { generatePublishSummary } from "./publish-summary";
@@ -39,8 +39,32 @@ type PublishingNotifier = {
   notifyPublishFailed(postId: string, targetId: string, message: string, options?: { needsLogin?: boolean; nextRunAt?: Date | null }): Promise<void>;
   notifyPublishWaitingForCookies?(postId: string, targetId: string, message: string): Promise<void>;
   notifyQZoneCookiesInvalid?(botAccountId: string, message: string, options?: { autoRefreshError?: string | null }): Promise<void>;
+  handleQZoneSessionHealth?(botAccountId: string, status: "available" | "invalid" | "unchecked", message: string, options?: { source?: string; autoRefreshError?: string | null }): Promise<void>;
   refreshQZoneCookiesByProtocol?(botAccountId: string, reason: "publish_login_required" | "publish_preflight_invalid"): Promise<{ cookieNames: string[] }>;
 };
+
+async function reportQZoneHealth(
+  notifier: PublishingNotifier | undefined,
+  botAccountId: string,
+  status: "available" | "invalid" | "unchecked",
+  message: string,
+  options?: { source?: string; autoRefreshError?: string | null },
+) {
+  if (status === "invalid") {
+    await markQZoneSessionInvalidForBot(botAccountId, message);
+  }
+  if (notifier?.handleQZoneSessionHealth) {
+    await notifier.handleQZoneSessionHealth(botAccountId, status, message, options);
+    return;
+  }
+  if (status === "invalid" && notifier?.notifyQZoneCookiesInvalid) {
+    await notifier.notifyQZoneCookiesInvalid(
+      botAccountId,
+      message,
+      options?.autoRefreshError === undefined ? {} : { autoRefreshError: options.autoRefreshError },
+    );
+  }
+}
 
 type ImagePayload = {
   key?: string;
@@ -1059,6 +1083,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
     const previousVerbose = caught instanceof QZonePublishError ? caught.verbose : null;
     const verbose = caught instanceof QZonePublishError ? toInputJson(caught.verbose) : JsonNull;
     const needsLogin = isQZoneLoginRequiredError(message);
+    let qzoneHealthReported = false;
     if (needsLogin && attempt.publishTarget.qzoneRefreshMode === "protocol" && notifier?.refreshQZoneCookiesByProtocol && currentAttempt.attempt < maxPublishAttempts) {
       try {
         const refreshResult = await notifier.refreshQZoneCookiesByProtocol(attempt.publishTarget.botAccountId, "publish_login_required");
@@ -1106,13 +1131,28 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
             { botAccountId: attempt.publishTarget.botAccountId, postId: attempt.postId, publishTargetId: attempt.publishTargetId, remainingMs: refreshError.remainingMs },
             "qzone cookies protocol auto refresh skipped during cooldown after publish login error",
           );
+          await reportQZoneHealth(notifier, attempt.publishTarget.botAccountId, "invalid", message, {
+            source: "publish_login_required",
+            autoRefreshError: refreshError.message,
+          });
+          qzoneHealthReported = true;
         } else {
           const refreshMessage = refreshError instanceof Error ? refreshError.message : "协议自动刷新失败";
-          await notifier.notifyQZoneCookiesInvalid?.(attempt.publishTarget.botAccountId, message, { autoRefreshError: refreshMessage }).catch((error) => {
+          await reportQZoneHealth(notifier, attempt.publishTarget.botAccountId, "invalid", message, {
+            source: "publish_login_required",
+            autoRefreshError: refreshMessage,
+          }).catch((error) => {
             logger.warn({ error, botAccountId: attempt.publishTarget.botAccountId }, "failed to notify qzone cookies auto refresh failure");
           });
+          qzoneHealthReported = Boolean(notifier?.handleQZoneSessionHealth || notifier?.notifyQZoneCookiesInvalid);
         }
       }
+    }
+    if (needsLogin && !qzoneHealthReported) {
+      await reportQZoneHealth(notifier, attempt.publishTarget.botAccountId, "invalid", message, {
+        source: "publish_login_required",
+        ...(attempt.publishTarget.qzoneRefreshMode === "protocol" ? {} : { autoRefreshError: "未配置协议自动刷新" }),
+      });
     }
     const shouldRetry = !needsLogin && currentAttempt.attempt < maxPublishAttempts;
     const nextRunAt = shouldRetry
@@ -1187,7 +1227,7 @@ async function resolveCookiesForPublish({
   logger: FastifyBaseLogger;
   notifier: PublishingNotifier | undefined;
 }) {
-  const checkedSession = await ensureSessionChecked(session);
+  const checkedSession = await ensureSessionChecked(session, notifier);
   const checkedCookies = getAvailableCookies(checkedSession);
   if (checkedCookies) {
     return checkedCookies;
@@ -1197,7 +1237,7 @@ async function resolveCookiesForPublish({
   if (qzoneRefreshMode === "protocol" && notifier?.refreshQZoneCookiesByProtocol) {
     try {
       await notifier.refreshQZoneCookiesByProtocol(botAccountId, "publish_preflight_invalid");
-      const refreshedSession = await findLatestQZoneSession(botAccountId);
+      const refreshedSession = await findLatestQZoneSession(botAccountId, notifier);
       const refreshedCookies = getAvailableCookies(refreshedSession);
       if (refreshedCookies) {
         return refreshedCookies;
@@ -1207,13 +1247,27 @@ async function resolveCookiesForPublish({
       if (isQZoneProtocolAutoRefreshCooldownError(error)) {
         autoRefreshError = error.message;
         logger.debug({ botAccountId, postId, publishTargetId, remainingMs: error.remainingMs }, "qzone cookies protocol auto refresh skipped during cooldown before publish");
+        await reportQZoneHealth(notifier, botAccountId, "invalid", checkedSession?.healthMessage ?? "QZone cookies 不可用", {
+          source: "publish_preflight_invalid",
+          autoRefreshError,
+        });
       } else {
         autoRefreshError = error instanceof Error ? error.message : "协议自动刷新失败";
-        await notifier.notifyQZoneCookiesInvalid?.(botAccountId, checkedSession?.healthMessage ?? "QZone cookies 不可用", { autoRefreshError }).catch((notifyError) => {
+        await reportQZoneHealth(notifier, botAccountId, "invalid", checkedSession?.healthMessage ?? "QZone cookies 不可用", {
+          source: "publish_preflight_invalid",
+          autoRefreshError,
+        }).catch((notifyError) => {
           logger.warn({ error: notifyError, botAccountId }, "failed to notify qzone cookies auto refresh failure before publish");
         });
       }
     }
+  }
+
+  if (checkedSession?.healthStatus === "invalid" && qzoneRefreshMode !== "protocol") {
+    await reportQZoneHealth(notifier, botAccountId, "invalid", checkedSession.healthMessage ?? "QZone cookies 不可用", {
+      source: "publish_preflight_invalid",
+      autoRefreshError: "未配置协议自动刷新",
+    });
   }
 
   const message = checkedSession?.healthMessage ?? "这个发布目标还没有可用的 QZone cookies";
@@ -1238,6 +1292,7 @@ async function ensureSessionChecked(
     healthStatus: string;
     healthMessage: string | null;
   } | null,
+  notifier?: PublishingNotifier,
 ) {
   if (!session) {
     return null;
@@ -1245,7 +1300,13 @@ async function ensureSessionChecked(
   if (session.healthStatus === "available") {
     return session;
   }
-  return checkAndUpdateQZoneSession(session.id);
+  const checked = await checkAndUpdateQZoneSession(session.id);
+  if (checked?.healthStatus === "available") {
+    await notifier?.handleQZoneSessionHealth?.(checked.botAccountId, "available", checked.healthMessage ?? "QZone 登录态已恢复", {
+      source: "publish_preflight_invalid",
+    });
+  }
+  return checked;
 }
 
 function getAvailableCookies(session: { cookies: Prisma.JsonValue; healthStatus: string } | null) {
@@ -1255,7 +1316,7 @@ function getAvailableCookies(session: { cookies: Prisma.JsonValue; healthStatus:
   return toCookieRecord(session.cookies);
 }
 
-async function findLatestQZoneSession(botAccountId: string) {
+async function findLatestQZoneSession(botAccountId: string, notifier?: PublishingNotifier) {
   const session = await prisma.botSession.findFirst({
     where: {
       botAccountId,
@@ -1266,7 +1327,7 @@ async function findLatestQZoneSession(botAccountId: string) {
       refreshedAt: "desc",
     },
   });
-  return ensureSessionChecked(session);
+  return ensureSessionChecked(session, notifier);
 }
 
 async function markAttemptWaitingForCookies({
@@ -1313,9 +1374,11 @@ async function markAttemptWaitingForCookies({
       comment: `${publishTargetName} 等待可用 QZone cookies：${autoRefreshError ?? message}`,
     },
   });
-  await notifier?.notifyPublishWaitingForCookies?.(postId, publishTargetId, autoRefreshError ?? message).catch((error) => {
-    logger.warn({ error, postId, publishTargetId }, "failed to notify publish waiting for cookies");
-  });
+  if (notifier?.notifyPublishWaitingForCookies) {
+    await notifier.notifyPublishWaitingForCookies(postId, publishTargetId, autoRefreshError ?? message).catch((error) => {
+      logger.warn({ error, postId, publishTargetId }, "failed to notify publish waiting for cookies");
+    });
+  }
 }
 
 function isQZoneLoginRequiredError(message: string) {
@@ -1497,7 +1560,9 @@ async function updatePostAggregateStatus(
 
   if (newStatus === "published") {
     await autoFollowOwnPostOnPublish(postId, tenantId).catch(() => undefined);
-    await notifier?.notifyAuthorPublishSucceeded?.(postId).catch(() => undefined);
+    if (notifier?.notifyAuthorPublishSucceeded) {
+      await notifier.notifyAuthorPublishSucceeded(postId).catch(() => undefined);
+    }
   }
 }
 

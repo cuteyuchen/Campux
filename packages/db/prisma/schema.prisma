@@ -82,6 +82,8 @@ model Tenant {
   qzoneVisitorSnapshots QZoneVisitorSnapshot[]
   botFriendSnapshots BotFriendSnapshot[]
   publishBatches PublishBatch[]
+  botHealthIncidents BotHealthIncident[]
+  botMessageInboxes BotMessageInbox[]
 }
 
 model User {
@@ -358,6 +360,8 @@ model BotAccount {
   tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   publishTargets PublishTarget[]
   sessions       BotSession[]
+  healthIncidents BotHealthIncident[]
+  messageInboxes BotMessageInbox[]
   qzoneVisitorSnapshots QZoneVisitorSnapshot[]
   friendSnapshots BotFriendSnapshot[]
 
@@ -385,6 +389,54 @@ model BotSession {
 
   @@unique([botAccountId, type, domain])
   @@index([botAccountId, refreshedAt])
+}
+
+model BotHealthIncident {
+  id                  String     @id @default(uuid())
+  tenantId            String
+  botAccountId        String
+  kind                String
+  startedAt           DateTime   @default(now())
+  resolvedAt          DateTime?
+  reason              String
+  details             Json?
+  faultNotifiedAt     DateTime?
+  recoveryNotifiedAt  DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  tenant              Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAccount          BotAccount @relation(fields: [botAccountId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, botAccountId, kind, resolvedAt])
+  @@index([botAccountId, kind, startedAt])
+}
+
+model BotMessageInbox {
+  id               String     @id @default(uuid())
+  tenantId         String
+  botAccountId     String
+  eventKey         String
+  rawEvent         Json
+  messageType      String
+  conversationKey  String
+  eventTime        DateTime?
+  receivedAt       DateTime   @default(now())
+  status           String     @default("pending")
+  attempts         Int        @default(0)
+  availableAt      DateTime   @default(now())
+  lockedAt         DateTime?
+  lastError        String?
+  processedAt      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  tenant           Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botAccount       BotAccount @relation(fields: [botAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([botAccountId, eventKey])
+  @@index([botAccountId, status, availableAt])
+  @@index([tenantId, status, availableAt])
+  @@index([conversationKey, status, availableAt])
+  @@index([processedAt])
 }
 
 model QZoneVisitorSnapshot {

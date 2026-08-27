@@ -825,11 +825,10 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
           userId: context.user.id,
           operatorId: context.user.id,
           reason: injectionResult.reason,
-          onBan: async (userId) => {
+          onBan: async (userId, _tenantIds, endsAt) => {
             const user = await prisma.user.findUnique({ where: { id: userId } });
             if (!user) return;
             const qqUin = user.qqUin.toString();
-            const endsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
             oneBot?.sendPrivateMessageViaTenantBots(context.selectedTenant.id, qqUin, formatBanNotify(context.selectedTenant.name, injectionResult.reason, endsAt)).catch((notifyErr) => {
               app.log.warn({ error: notifyErr }, "failed to send ban notification");
             });

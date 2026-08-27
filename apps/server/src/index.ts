@@ -119,6 +119,7 @@ app.addHook("onClose", async () => {
 
 await queue.start();
 await recoverPublishAttempts(queue, app.log);
+void oneBot.consumePendingMessageInboxes().catch((error) => app.log.warn({ error }, "failed to consume pending onebot message inboxes on startup"));
 const stopQZoneCookieHeartbeat = registerQZoneCookieHeartbeat(app.log, oneBot);
 const stopTenantLifecycleScheduler = registerTenantLifecycleScheduler({ logger: app.log, config });
 const stopQZonePostMetricScheduler = registerQZonePostMetricScheduler({ queue, logger: app.log });

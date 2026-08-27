@@ -327,7 +327,7 @@ export function formatPrivatePostHistory(items: Array<{ displayId: number; text:
     const shortPreview = preview ? (preview.length > 36 ? `${preview.slice(0, 36)}…` : preview) : "（仅图片投稿）";
     lines.push("", `#${item.displayId}｜${formatPrivatePostStatus(item.status)}｜${item.createdAt}`, shortPreview);
   }
-  lines.push("", "发送“撤回123”可取消自己的待审核稿件，或申请撤回自己的已发布稿件；也可以追加撤回理由。前缀 # 可省略。");
+  lines.push("", "发送“撤回 编号”可取消自己的待审核稿件，或申请撤回自己的已发布稿件；如需附加理由，请使用“撤回 编号 理由”，例如“撤回 12 内容有误”。前缀 # 可省略。");
   return lines.join("\n");
 }
 
@@ -343,7 +343,7 @@ export function formatPrivatePostWithdrawPrompt(items: Array<{ displayId: number
   }
   lines.push(
     "",
-    "请输入“撤回+编号+理由”，例如：撤回12 内容有误。待审核稿件会直接取消，已发布稿件会提交撤回申请；审核通过待发布或发布中的稿件请等待发布完成后再申请。",
+    "请输入“撤回 编号 [理由]”，例如：撤回 12 内容有误。待审核稿件会直接取消，已发布稿件会提交撤回申请；审核通过待发布或发布中的稿件请等待发布完成后再申请。",
   );
   return lines.join("\n");
 }
@@ -680,6 +680,12 @@ export function formatQZoneAutoRefreshReason(reason: string): string {
   if (reason === "publish_preflight_invalid") {
     return "发布前发现登录态不可用";
   }
+  if (reason === "admin_check") {
+    return "后台手动检测发现登录态不可用";
+  }
+  if (reason === "review_group_refresh") {
+    return "审核群刷新后检测登录态";
+  }
   return "定时检测发现登录态失效";
 }
 
@@ -814,7 +820,7 @@ const privateCommandHelpDefault = [
   "投稿：开始对话投稿",
   "稿件：查看最近 5 条投稿",
   "撤回：查看可处理稿件",
-  "撤回+编号+理由：取消或申请撤回自己的稿件",
+  "撤回 编号 [理由]：取消或申请撤回自己的稿件，例如“撤回 12 内容有误”",
   "重置密码：重置登录密码",
   "",
   "投稿过程中：匿名、实名、撤回上一条、结束、确认、取消",
@@ -1018,6 +1024,94 @@ export function formatBanNotify(tenantName: string, reason: string, endsAt: Date
 
 export function formatUnbanNotify(tenantName: string): string {
   return `你的账号在「${tenantName}」中已被解封，现在可以正常使用。`;
+}
+
+// ── Bot 连接 / QZone 登录态监控 ───────────────────────
+
+type BotHealthMessageInput = {
+  botName: string;
+  botQqUin: string;
+  reason: string;
+  startedAt: Date;
+  endedAt?: Date;
+  durationMs?: number;
+  pendingMessageCount: number;
+  combined?: boolean;
+};
+
+export function formatBotConnectionOffline(input: BotHealthMessageInput): string {
+  return [
+    "OneBot 连接故障告警",
+    `机器人：${input.botName} / QQ ${input.botQqUin}`,
+    `故障开始：${formatHealthDate(input.startedAt)}`,
+    `原因：${input.reason}`,
+    `待处理消息：${input.pendingMessageCount} 条`,
+    "系统将在连接恢复后自动补偿离线消息。",
+  ].join("\n");
+}
+
+export function formatBotConnectionRecovered(input: BotHealthMessageInput): string {
+  return [
+    input.combined ? "OneBot 连接故障已恢复" : "OneBot 连接恢复通知",
+    `机器人：${input.botName} / QQ ${input.botQqUin}`,
+    `故障时间段：${formatHealthDate(input.startedAt)} ${input.endedAt ? `至 ${formatHealthDate(input.endedAt)}` : "至今"}`,
+    `持续时长：${formatHealthDuration(input.durationMs ?? 0)}`,
+    `待处理消息：${input.pendingMessageCount} 条`,
+    "已恢复接收，正在按顺序补偿处理消息。",
+  ].join("\n");
+}
+
+export function formatQZoneSessionInvalid(input: BotHealthMessageInput): string {
+  return [
+    "QZone 登录态不可用告警",
+    `机器人：${input.botName} / QQ ${input.botQqUin}`,
+    `首次发现：${formatHealthDate(input.startedAt)}`,
+    `原因：${input.reason}`,
+    `待处理消息：${input.pendingMessageCount} 条`,
+    "请重新登录或等待协议自动刷新。",
+  ].join("\n");
+}
+
+export function formatQZoneSessionRecovered(input: BotHealthMessageInput): string {
+  return [
+    input.combined ? "QZone 登录态故障已恢复" : "QZone 登录态恢复通知",
+    `机器人：${input.botName} / QQ ${input.botQqUin}`,
+    `故障时间段：${formatHealthDate(input.startedAt)} ${input.endedAt ? `至 ${formatHealthDate(input.endedAt)}` : "至今"}`,
+    `持续时长：${formatHealthDuration(input.durationMs ?? 0)}`,
+    `待处理消息：${input.pendingMessageCount} 条`,
+    "等待中的发布任务会自动恢复。",
+  ].join("\n");
+}
+
+export function formatBotMessageReplayFailed(input: { botName: string; botQqUin: string; error: string; pendingMessageCount: number }): string {
+  return [
+    "OneBot 离线消息补偿失败",
+    `机器人：${input.botName} / QQ ${input.botQqUin}`,
+    `错误：${input.error}`,
+    `待处理/失败消息：${input.pendingMessageCount} 条`,
+    "请到管理后台点击“重试失败消息”。",
+  ].join("\n");
+}
+
+function formatHealthDate(value: Date) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(value);
+}
+
+function formatHealthDuration(durationMs: number) {
+  const totalMinutes = Math.max(0, Math.floor(durationMs / 60_000));
+  if (totalMinutes < 60) {
+    return `${Math.max(1, totalMinutes)} 分钟`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`;
 }
 
 // ── 审核队列 ──────────────────────────────────────────

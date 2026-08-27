@@ -34,6 +34,8 @@ export function isPrismaKnownRequestError(
 }
 
 export type {
+  BotHealthIncident,
+  BotMessageInbox,
   OAuthAccessToken,
   OAuthAuthorizationCode,
   OAuthClient,
