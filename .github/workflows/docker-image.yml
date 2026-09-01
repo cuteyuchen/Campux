@@ -58,6 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
+    env:
+      DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+      DOCKER_HUB_PASSWORD: ${{ secrets.DOCKER_HUB_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,38 +100,67 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build and push Campux GHCR image
+        uses: docker/build-push-action@v6
+        continue-on-error: true
+        id: build_ghcr
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:last
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
+          cache-from: type=gha,scope=campux
+          cache-to: type=gha,mode=max,scope=campux
+          provenance: false
+          sbom: false
+
+      - name: Retry Campux GHCR image build
+        if: steps.build_ghcr.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:last
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
+          cache-from: type=gha,scope=campux
+          cache-to: type=gha,mode=max,scope=campux
+          provenance: false
+          sbom: false
+
       - name: Login to Docker Hub
+        if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
       - name: Build and push branch image
+        if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
         continue-on-error: true
         id: build_main
         with:
           context: .
           push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}
-            ${{ env.IMAGE_NAME }}:last
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          tags: ${{ steps.meta.outputs.image }}
           build-args: |
             CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Retry build on failure
-        if: steps.build_main.outcome == 'failure'
+        if: ${{ steps.build_main.outcome == 'failure' && env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}
-            ${{ env.IMAGE_NAME }}:last
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          tags: ${{ steps.meta.outputs.image }}
           build-args: |
             CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
           cache-from: type=gha
@@ -138,6 +170,7 @@ jobs:
           sbom: false
 
       - name: Build and push telemetry dash image
+        if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
         continue-on-error: true
         id: build_dash
@@ -150,7 +183,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=dash
 
       - name: Retry dash build on failure
-        if: steps.build_dash.outcome == 'failure'
+        if: ${{ steps.build_dash.outcome == 'failure' && env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -163,6 +196,7 @@ jobs:
           sbom: false
 
       - name: Build and push landing image
+        if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
         continue-on-error: true
         id: build_landing
@@ -175,7 +209,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=landing
 
       - name: Retry landing build on failure
-        if: steps.build_landing.outcome == 'failure'
+        if: ${{ steps.build_landing.outcome == 'failure' && env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
         with:
           context: .
