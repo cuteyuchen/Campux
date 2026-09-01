@@ -1,0 +1,2 @@
+ALTER TABLE "BotAccount"
+ADD COLUMN IF NOT EXISTS "reviewQueueReminderAtAll" BOOLEAN NOT NULL DEFAULT false;
