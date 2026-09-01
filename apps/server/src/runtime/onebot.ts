@@ -362,6 +362,7 @@ export class OneBotRuntime {
   ) {
     this.inboxConsumer = new BotMessageInboxConsumer({
       logger: this.logger,
+      shouldRetryError: (error) => !(error instanceof BotWorkflowError) || error.statusCode >= 500,
     });
     const testRuntime = process.env.NODE_ENV === "test" || this.config?.nodeEnv === "test";
     this.reviewQueueReminderTimer = testRuntime

@@ -106,18 +106,21 @@ export type BotMessageInboxConsumerOptions = {
   client?: BotMessageInboxClient;
   maxConcurrency?: number;
   logger?: { warn?(meta: unknown, message?: string): void; info?(meta: unknown, message?: string): void };
+  shouldRetryError?: (error: unknown) => boolean;
 };
 
 export class BotMessageInboxConsumer {
   private readonly client: BotMessageInboxClient;
   private readonly maxConcurrency: number;
   private readonly logger?: BotMessageInboxConsumerOptions["logger"];
+  private readonly shouldRetryError: (error: unknown) => boolean;
   private readonly running = new Map<string, Promise<number>>();
 
   constructor(options: BotMessageInboxConsumerOptions = {}) {
     this.client = options.client ?? prisma;
     this.maxConcurrency = Math.max(1, Math.min(16, Math.trunc(options.maxConcurrency ?? 4)));
     this.logger = options.logger;
+    this.shouldRetryError = options.shouldRetryError ?? (() => true);
   }
 
   consume(
@@ -176,9 +179,10 @@ export class BotMessageInboxConsumer {
       const records = await this.client.botMessageInbox.findMany({
         where: {
           botAccountId,
-          // Keep terminal failures in the ordering scan as a barrier. A later
+          // Retryable failures stay in the ordering scan as a barrier. A later
           // message from the same conversation must not overtake one that is
-          // waiting for an operator retry.
+          // waiting for an operator retry. Terminal failures are moved to
+          // `discarded` and therefore no longer participate in ordering.
           status: { in: ["pending", "processing", "failed"] },
         },
         orderBy: [
@@ -240,6 +244,23 @@ export class BotMessageInboxConsumer {
       return true;
     } catch (error) {
       const attempts = Number(record.attempts ?? 0) + 1;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!this.shouldRetryError(error)) {
+        await this.client.botMessageInbox.update({
+          where: { id: record.id },
+          data: {
+            status: "discarded",
+            attempts,
+            availableAt: new Date(),
+            lockedAt: null,
+            lastError: message,
+            processedAt: new Date(),
+          },
+        });
+        this.logger?.warn?.({ error, inboxId: record.id, attempts, retryable: false }, "bot message inbox processing discarded");
+        return true;
+      }
+
       // `attempts` includes the initial processing failure. Keep every
       // configured backoff in play, then mark the next failed execution for
       // manual handling.
@@ -252,7 +273,7 @@ export class BotMessageInboxConsumer {
           attempts,
           availableAt: exhausted ? new Date() : new Date(Date.now() + retryDelayForAttempt(attempts)),
           lockedAt: null,
-          lastError: error instanceof Error ? error.message : String(error),
+          lastError: message,
         },
       });
       if (exhausted) {

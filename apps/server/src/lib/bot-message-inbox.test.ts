@@ -109,4 +109,60 @@ describe("BotMessageInboxConsumer", () => {
     expect(failedAttempts).toBe(6);
     expect(rows[1].status).toBe("pending");
   });
+
+  test("does not let terminal errors block later messages in the same conversation", async () => {
+    const rows: any[] = [
+      {
+        id: "terminal",
+        botAccountId: "bot",
+        conversationKey: "group:1",
+        rawEvent: { message_type: "group", group_id: 1, message_id: 1 },
+        status: "pending",
+        attempts: 0,
+        availableAt: new Date(0),
+      },
+      {
+        id: "later",
+        botAccountId: "bot",
+        conversationKey: "group:1",
+        rawEvent: { message_type: "group", group_id: 1, message_id: 2 },
+        status: "pending",
+        attempts: 0,
+        availableAt: new Date(0),
+      },
+    ];
+    const fake: any = {
+      botMessageInbox: {
+        findMany: async ({ where }: any) => rows.filter((row) => row.botAccountId === where.botAccountId && where.status.in.includes(row.status)),
+        updateMany: async ({ where, data }: any) => {
+          const row = rows.find((item) => item.id === where.id && item.status === where.status);
+          if (!row) return { count: 0 };
+          Object.assign(row, data);
+          return { count: 1 };
+        },
+        update: async ({ where, data }: any) => {
+          const row = rows.find((item) => item.id === where.id);
+          Object.assign(row, data);
+          return row;
+        },
+      },
+    };
+    const consumer = new BotMessageInboxConsumer({
+      client: fake,
+      maxConcurrency: 1,
+      shouldRetryError: () => false,
+    });
+    let calls = 0;
+    await consumer.consume("bot", async (_event, record) => {
+      calls += 1;
+      if (record.id === "terminal") {
+        throw new Error("稿件已处理");
+      }
+    });
+
+    expect(calls).toBe(2);
+    expect(rows[0].status).toBe("discarded");
+    expect(rows[0].lastError).toBe("稿件已处理");
+    expect(rows[1].status).toBe("processed");
+  });
 });

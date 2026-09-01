@@ -798,7 +798,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
             startedAt: incident.startedAt.toISOString(),
             reason: incident.reason,
           })),
-          pendingMessageCount: rows.filter((row) => row.status !== "failed").length,
+          pendingMessageCount: rows.filter((row) => ["pending", "processing"].includes(row.status)).length,
           failedMessageCount: rows.filter((row) => row.status === "failed").length,
           latestError,
           lastHeartbeatAt: connection && "lastHeartbeatAt" in connection && typeof connection.lastHeartbeatAt === "number"
