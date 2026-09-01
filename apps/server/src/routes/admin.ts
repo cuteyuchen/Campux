@@ -27,6 +27,7 @@ import {
   endActiveBanRecords,
   upsertBanRecord,
 } from "../lib/ban-management";
+import { runWithActiveTenantLease } from "../lib/tenant-runtime-lease";
 
 const roleSchema = z.enum(["submitter", "reviewer", "admin"]);
 
@@ -78,6 +79,7 @@ const botCreateSchema = z.discriminatedUnion("platform", [
     reviewNotificationEnabled: z.boolean().default(false),
     reviewQueueAutoReminderEnabled: z.boolean().default(false),
     reviewQueueReminderThresholdHours: z.number().int().min(1).max(168).default(6),
+    reviewQueueReminderAtAll: z.boolean().default(false),
     autoFriendRequestApprovalEnabled: z.boolean().default(false),
     enabled: z.boolean().default(true),
     createPublishTarget: z.boolean().default(true),
@@ -111,6 +113,7 @@ const botPatchSchema = z.object({
   reviewNotificationEnabled: z.boolean().optional(),
   reviewQueueAutoReminderEnabled: z.boolean().optional(),
   reviewQueueReminderThresholdHours: z.number().int().min(1).max(168).optional(),
+  reviewQueueReminderAtAll: z.boolean().optional(),
   autoFriendRequestApprovalEnabled: z.boolean().optional(),
   userMessageReply: z.string().trim().min(1).max(1000).optional(),
   userMessageReplyCooldownSeconds: z.number().int().min(0).max(86_400).optional(),
@@ -829,12 +832,17 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
   });
 
   app.post("/api/admin/official-qq/discovery", async (request, reply) => {
-    await requireTenantRole(request, reply, "admin");
+    const context = await requireTenantRole(request, reply, "admin");
     const body = officialQqDiscoverySchema.parse(request.body);
     const bot = { id: `discovery:${body.appId}`, officialAppId: body.appId, officialAppSecret: encryptJson(body.appSecret) as Prisma.JsonValue };
     try {
-      if (body.guildId) return { channels: await listOfficialQqChannels(bot, body.guildId) };
-      return { guilds: await listOfficialQqGuilds(bot) };
+      const discovered = await runWithActiveTenantLease(prisma, context.selectedTenant.id, async () => (
+        body.guildId
+          ? { channels: await listOfficialQqChannels(bot, body.guildId) }
+          : { guilds: await listOfficialQqGuilds(bot) }
+      ));
+      if (!discovered.active) return reply.code(409).send({ message: "校园墙已暂停或归档" });
+      return discovered.value;
     } catch (error) {
       if (error instanceof BotWorkflowError) return reply.code(error.statusCode).send({ message: error.message });
       throw error;
@@ -847,7 +855,9 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
     const bot = await prisma.botAccount.findFirst({ where: { id: params.id, tenantId: context.selectedTenant.id, platform: "official_qq" } });
     if (!bot) return reply.code(404).send({ message: "QQ 官方机器人不存在" });
     try {
-      return { guilds: await listOfficialQqGuilds(bot) };
+      const discovered = await runWithActiveTenantLease(prisma, context.selectedTenant.id, async () => ({ guilds: await listOfficialQqGuilds(bot) }));
+      if (!discovered.active) return reply.code(409).send({ message: "校园墙已暂停或归档" });
+      return discovered.value;
     } catch (error) {
       if (error instanceof BotWorkflowError) return reply.code(error.statusCode).send({ message: error.message });
       throw error;
@@ -861,7 +871,9 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
     const bot = await prisma.botAccount.findFirst({ where: { id: params.id, tenantId: context.selectedTenant.id, platform: "official_qq" } });
     if (!bot) return reply.code(404).send({ message: "QQ 官方机器人不存在" });
     try {
-      return { channels: await listOfficialQqChannels(bot, query.guildId) };
+      const discovered = await runWithActiveTenantLease(prisma, context.selectedTenant.id, async () => ({ channels: await listOfficialQqChannels(bot, query.guildId) }));
+      if (!discovered.active) return reply.code(409).send({ message: "校园墙已暂停或归档" });
+      return discovered.value;
     } catch (error) {
       if (error instanceof BotWorkflowError) return reply.code(error.statusCode).send({ message: error.message });
       throw error;
@@ -954,6 +966,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
           reviewNotificationEnabled: body.reviewNotificationEnabled,
           reviewQueueAutoReminderEnabled: body.reviewQueueAutoReminderEnabled,
           reviewQueueReminderThresholdHours: body.reviewQueueReminderThresholdHours,
+          reviewQueueReminderAtAll: body.reviewQueueReminderAtAll,
           autoFriendRequestApprovalEnabled: body.autoFriendRequestApprovalEnabled,
           enabled: body.enabled,
           ...(body.createPublishTarget
@@ -991,6 +1004,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
         reviewNotificationEnabled: body.reviewNotificationEnabled,
         reviewQueueAutoReminderEnabled: body.reviewQueueAutoReminderEnabled,
         reviewQueueReminderThresholdHours: body.reviewQueueReminderThresholdHours,
+        reviewQueueReminderAtAll: body.reviewQueueReminderAtAll,
         autoFriendRequestApprovalEnabled: body.autoFriendRequestApprovalEnabled,
       },
     });
@@ -1044,6 +1058,7 @@ export function registerAdminRoutes(app: FastifyInstance, queue: RuntimeQueue, o
           ...(bot.platform === "onebot" && body.reviewNotificationEnabled !== undefined ? { reviewNotificationEnabled: body.reviewNotificationEnabled } : {}),
           ...(bot.platform === "onebot" && body.reviewQueueAutoReminderEnabled !== undefined ? { reviewQueueAutoReminderEnabled: body.reviewQueueAutoReminderEnabled } : {}),
           ...(bot.platform === "onebot" && body.reviewQueueReminderThresholdHours !== undefined ? { reviewQueueReminderThresholdHours: body.reviewQueueReminderThresholdHours } : {}),
+          ...(bot.platform === "onebot" && body.reviewQueueReminderAtAll !== undefined ? { reviewQueueReminderAtAll: body.reviewQueueReminderAtAll } : {}),
           ...(bot.platform === "onebot" && body.autoFriendRequestApprovalEnabled !== undefined ? { autoFriendRequestApprovalEnabled: body.autoFriendRequestApprovalEnabled } : {}),
           ...(bot.platform === "onebot" && body.userMessageReply !== undefined ? { userMessageReply: body.userMessageReply } : {}),
           ...(bot.platform === "onebot" && body.userMessageReplyCooldownSeconds !== undefined ? { userMessageReplyCooldownSeconds: body.userMessageReplyCooldownSeconds } : {}),
@@ -1683,6 +1698,7 @@ function toBotAccount(
     reviewNotificationEnabled: boolean;
     reviewQueueAutoReminderEnabled: boolean;
     reviewQueueReminderThresholdHours: number;
+    reviewQueueReminderAtAll: boolean;
     autoFriendRequestApprovalEnabled: boolean;
     connectionToken: string;
     publishTextTemplate: Prisma.JsonValue;
@@ -1738,6 +1754,7 @@ function toBotAccount(
     reviewNotificationEnabled: bot.reviewNotificationEnabled,
     reviewQueueAutoReminderEnabled: bot.reviewQueueAutoReminderEnabled,
     reviewQueueReminderThresholdHours: bot.reviewQueueReminderThresholdHours,
+    reviewQueueReminderAtAll: bot.reviewQueueReminderAtAll,
     autoFriendRequestApprovalEnabled: bot.autoFriendRequestApprovalEnabled,
     connectionToken: bot.connectionToken,
     publishTextTemplate: normalizePublishTextTemplate(bot.publishTextTemplate),

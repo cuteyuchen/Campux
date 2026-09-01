@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { FastifyBaseLogger } from "fastify";
 import type { CampuxConfig } from "@campux/config";
+import type { EventBus } from "@campux/plugin";
 import { getStorageDriver, setQZoneEmotionPrivate } from "@campux/integrations";
 import { Prisma, TransactionIsolationLevel, isPrismaKnownRequestError } from "@campux/db";
 import {
@@ -29,6 +30,8 @@ import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../
 import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
 import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
 import { findBlockedWordsInPostImages, OcrUnavailableError } from "../lib/ocr";
+import { isTenantRuntimeActive, tenantRuntimeRelationFilter } from "../lib/tenant-runtime";
+import { lockActiveTenantRuntime, runWithActiveTenantLease } from "../lib/tenant-runtime-lease";
 import {
   buildImageSourceSizeErrorMessage,
   imageStorageHardMaxBytes,
@@ -49,7 +52,7 @@ import type { RuntimeQueue } from "./queue";
 import { checkAndUpdateQZoneSession, evaluateQZoneSessionHealth, markQZoneSessionInvalidForBot } from "../lib/qzone-cookies";
 import { QZoneProtocolAutoRefreshCooldownError, qzoneProtocolAutoRefreshFailureCooldownMs } from "../lib/qzone-auto-refresh";
 import { pollQZoneQrLogin, startQZoneQrLogin } from "../lib/qzone-login";
-import { resumePublishAttemptsWaitingForCookies } from "./publishing";
+import { requeuePublishFanout, resumePublishAttemptsWaitingForCookies } from "./publishing";
 import { selectReviewNotificationBot } from "./notification-routing";
 import {
   BotMessageInboxConsumer,
@@ -136,12 +139,17 @@ import {
 import { buildFriendRequestAutoApprovePlan, buildSetFriendAddRequestParams, type OneBotRequestEvent } from "./onebot-friend-requests";
 import { collectOverdueReviewReminders, listPendingReviewQueue, reviewQueueReminderIntervalMs } from "./review-queue";
 import { PrivateRegistrationCoordinator } from "./private-registration";
+import {
+  TenantInteractionGenerationFence,
+  type TenantInteractionPermit,
+} from "../lib/tenant-interaction-generation";
 
 type OneBotConnection = {
   socket: WebSocketLike;
   botAccountId: string;
   tenantId: string;
   selfId: string | null;
+  permit: TenantInteractionPermit;
   connectedAt: number;
   lastHeartbeatAt: number;
   protocolOnline: boolean | null;
@@ -157,6 +165,9 @@ type WebSocketLike = {
 };
 
 type PendingAction = {
+  tenantId: string;
+  permit: TenantInteractionPermit;
+  connection: OneBotConnection;
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: Timer;
@@ -310,6 +321,7 @@ function readRecallReason(comment: string | undefined): string | null {
 }
 
 export class OneBotRuntime {
+  private readonly interactionFence = new TenantInteractionGenerationFence();
   private readonly connections = new Set<OneBotConnection>();
   private readonly monitoredBotAccountIds = new Set<string>();
   private readonly mutedBotAccountIds = new Set<string>();
@@ -327,7 +339,8 @@ export class OneBotRuntime {
   private readonly privateRegistrationCoordinator = new PrivateRegistrationCoordinator<Awaited<ReturnType<typeof registerUserViaBot>>>();
   private readonly privatePasswordResetCoordinator = new PrivateRegistrationCoordinator<Awaited<ReturnType<typeof resetPasswordViaBot>>>();
   private readonly pendingFriendRequestFlags = new Set<string>();
-  private readonly privateForwardMsgIdMap = new Map<string, { userQqUin: string; userNickname: string; botQqUin: string }>();
+  private readonly pendingFriendRequestTimers = new Map<string, { tenantId: string; timer: Timer }>();
+  private readonly privateForwardMsgIdMap = new Map<string, { tenantId: string; userQqUin: string; userNickname: string; botQqUin: string }>();
   private static readonly MAX_FORWARD_MSG_ID_MAP_SIZE = 500;
   private readonly qzoneProtocolAutoRefreshFailures = new Map<string, QZoneProtocolAutoRefreshFailure>();
   private readonly qzoneProtocolAutoRefreshInFlight = new Map<string, Promise<{ cookieNames: string[]; session: { id: string } }>>();
@@ -345,12 +358,13 @@ export class OneBotRuntime {
     private readonly queue: RuntimeQueue,
     private readonly logger: FastifyBaseLogger,
     private readonly config?: CampuxConfig,
+    private readonly pluginEvents?: EventBus,
   ) {
     this.inboxConsumer = new BotMessageInboxConsumer({
       logger: this.logger,
     });
     const testRuntime = process.env.NODE_ENV === "test" || this.config?.nodeEnv === "test";
-    this.reviewQueueReminderTimer = testRuntime || this.config?.nodeEnv === "production"
+    this.reviewQueueReminderTimer = testRuntime
       ? null
       : setInterval(() => {
           this.runReviewQueueReminderScan().catch((error) => {
@@ -393,6 +407,63 @@ export class OneBotRuntime {
     if (this.inboxCleanupTimer) {
       clearInterval(this.inboxCleanupTimer);
     }
+    for (const { timer } of this.pendingFriendRequestTimers.values()) clearTimeout(timer);
+    this.pendingFriendRequestTimers.clear();
+    for (const [echo, pending] of this.pendingActions) {
+      clearTimeout(pending.timer);
+      pending.reject(new BotWorkflowError("OneBot 运行时已关闭", 503));
+      this.pendingActions.delete(echo);
+    }
+  }
+
+  disconnectTenant(tenantId: string) {
+    this.interactionFence.deactivate(tenantId);
+    for (const connection of Array.from(this.connections)) {
+      if (connection.tenantId !== tenantId) {
+        continue;
+      }
+      connection.socket.close?.(1008, "tenant inactive");
+      this.connections.delete(connection);
+    }
+    for (const [key, buffer] of this.privateForwardBuffers) {
+      if (buffer.tenantId === tenantId) {
+        if (buffer.timer) clearTimeout(buffer.timer);
+        this.privateForwardBuffers.delete(key);
+      }
+    }
+    for (const [key, mapping] of this.privateForwardMsgIdMap) {
+      if (mapping.tenantId === tenantId) this.privateForwardMsgIdMap.delete(key);
+    }
+    for (const [key, buffer] of this.privatePostAggregateBuffers) {
+      if (buffer.tenantId === tenantId) {
+        if (buffer.timer) clearTimeout(buffer.timer);
+        if (buffer.typingTimer) clearTimeout(buffer.typingTimer);
+        this.privatePostAggregateBuffers.delete(key);
+      }
+    }
+    for (const stateMap of [this.privatePostPendingModes, this.privatePostPendingConfirms, this.privatePostDrafts]) {
+      for (const [key, state] of stateMap) {
+        if (state.tenantId === tenantId) stateMap.delete(key);
+      }
+    }
+    for (const [flag, pending] of this.pendingFriendRequestTimers) {
+      if (pending.tenantId === tenantId) {
+        clearTimeout(pending.timer);
+        this.pendingFriendRequestTimers.delete(flag);
+        this.pendingFriendRequestFlags.delete(flag);
+      }
+    }
+    for (const [echo, pending] of this.pendingActions) {
+      if (pending.tenantId === tenantId) {
+        clearTimeout(pending.timer);
+        this.pendingActions.delete(echo);
+        pending.reject(new BotWorkflowError("校园墙已暂停或归档", 409));
+      }
+    }
+  }
+
+  activateTenant(tenantId: string) {
+    this.interactionFence.activate(tenantId);
   }
 
   async handleConnection(socket: WebSocketLike, request: { headers: Record<string, string | string[] | undefined>; url?: string }) {
@@ -402,11 +473,17 @@ export class OneBotRuntime {
       this.logger.warn("onebot websocket rejected");
       return;
     }
+    const permit = this.interactionFence.snapshot(auth.tenantId);
+    if (!this.interactionFence.isCurrent(permit)) {
+      socket.close?.(1008, "tenant inactive");
+      return;
+    }
     const connection: OneBotConnection = {
       socket,
       botAccountId: auth.id,
       tenantId: auth.tenantId,
       selfId: auth.qqUin.toString(),
+      permit,
       connectedAt: Date.now(),
       lastHeartbeatAt: Date.now(),
       protocolOnline: true,
@@ -429,6 +506,12 @@ export class OneBotRuntime {
     socket.on("close", () => {
       this.connections.delete(connection);
       this.noteConnectionUnhealthy(connection, "OneBot WebSocket 连接已断开");
+      for (const [echo, pending] of this.pendingActions) {
+        if (pending.connection !== connection) continue;
+        clearTimeout(pending.timer);
+        this.pendingActions.delete(echo);
+        pending.reject(new BotWorkflowError("OneBot 连接已断开", 503));
+      }
     });
     socket.on("error", (error) => {
       this.logger.warn({ error }, "onebot websocket error");
@@ -1560,6 +1643,16 @@ export class OneBotRuntime {
     if (!connection) {
       throw new BotWorkflowError(`Bot ${botQqUin} 的 OneBot 连接不在线`, 503);
     }
+    if (!await this.ensureConnectionTenantActive(connection)) {
+      throw new BotWorkflowError("校园墙已暂停或归档", 409);
+    }
+    if (
+      !this.connections.has(connection)
+      || connection.socket.readyState !== 1
+      || !this.interactionFence.isCurrent(connection.permit)
+    ) {
+      throw new BotWorkflowError("校园墙已暂停或归档", 409);
+    }
 
     const echo = `campux:${crypto.randomUUID()}`;
     const payload = {
@@ -1568,12 +1661,20 @@ export class OneBotRuntime {
       echo,
     };
 
-    const response = await new Promise<OneBotActionResponse>((resolve, reject) => {
+    const leased = await runWithActiveTenantLease(prisma, connection.tenantId, async () => {
+      return new Promise<OneBotActionResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingActions.delete(echo);
         reject(new BotWorkflowError(`OneBot 动作 ${action} 等待响应超时`, 504));
       }, timeoutMs);
-      this.pendingActions.set(echo, { resolve: resolve as (value: unknown) => void, reject, timer });
+      this.pendingActions.set(echo, {
+        tenantId: connection.tenantId,
+        permit: connection.permit,
+        connection,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
       connection.socket.send(JSON.stringify(payload), (error) => {
         if (error) {
           clearTimeout(timer);
@@ -1581,7 +1682,12 @@ export class OneBotRuntime {
           reject(error);
         }
       });
+      });
     });
+    if (!leased.active) {
+      throw new BotWorkflowError("校园墙已暂停或归档", 409);
+    }
+    const response = leased.value;
 
     if (response.status && response.status !== "ok") {
       throw new BotWorkflowError(response.message || response.wording || `OneBot 动作 ${action} 执行失败`, 502);
@@ -1597,6 +1703,9 @@ export class OneBotRuntime {
     const event = JSON.parse(payload) as OneBotMessageEvent | OneBotActionResponse;
     if ("echo" in event && event.echo) {
       this.resolvePendingAction(event);
+      return;
+    }
+    if (!await this.ensureConnectionTenantActive(connection)) {
       return;
     }
 
@@ -1754,6 +1863,7 @@ export class OneBotRuntime {
       where: {
         id: connection.botAccountId,
         tenantId: connection.tenantId,
+        tenant: tenantRuntimeRelationFilter,
       },
       select: {
         id: true,
@@ -1806,7 +1916,8 @@ export class OneBotRuntime {
       "onebot friend request auto approval scheduled",
     );
 
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      this.pendingFriendRequestTimers.delete(plan.flag);
       this.executeFriendRequestAutoApproval({
         botAccountId: bot.id,
         tenantId: bot.tenantId,
@@ -1818,6 +1929,7 @@ export class OneBotRuntime {
         this.logger.warn({ error, botAccountId: bot.id, botQqUin: bot.qqUin.toString(), userQqUin: plan.userQqUin }, "onebot friend request auto approval failed");
       });
     }, plan.delayMs);
+    this.pendingFriendRequestTimers.set(plan.flag, { tenantId: bot.tenantId, timer });
   }
 
   private async executeFriendRequestAutoApproval(options: { botAccountId: string; tenantId: string; botQqUin: string; userQqUin: string; flag: string; delayMs: number }) {
@@ -1826,6 +1938,7 @@ export class OneBotRuntime {
         where: {
           id: options.botAccountId,
           tenantId: options.tenantId,
+          tenant: tenantRuntimeRelationFilter,
         },
         select: {
           enabled: true,
@@ -1886,6 +1999,15 @@ export class OneBotRuntime {
 
     try {
       const bot = await findEnabledBot(botQqUin);
+
+      // 触发插件事件：Bot 收到私聊消息
+      this.pluginEvents?.emit({
+        type: "bot:message_received",
+        tenantId: bot.tenantId,
+        botAccountId: bot.id,
+        rawMessage: event,
+      });
+
       const plainText = extractOneBotPlainText(event.message, event.raw_message).trim();
       if (this.isSkippablePrivateMessage(plainText || event.raw_message || "")) {
         return;
@@ -2590,9 +2712,13 @@ export class OneBotRuntime {
   }) {
     const access = await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
     await this.assertPrivatePostPendingLimit(bot.tenantId, access.operator.id);
+    const permit = this.interactionFence.snapshot(bot.tenantId);
+    if (!this.interactionFence.isCurrent(permit)) {
+      throw new BotWorkflowError("校园墙已暂停或归档", 409);
+    }
 
     const draftKey = this.getPrivatePostDraftKey(botQqUin, userQqUin);
-    const staged = await this.stagePrivatePostAttachments(bot, event);
+    const staged = await this.stagePrivatePostAttachments(bot, event, permit);
     if (staged.attachments.length > 9) {
       await this.clearStagedPrivatePostAttachments(staged.uploadedKeys);
       throw new BotWorkflowError("最多 9 张图片", 400);
@@ -2601,6 +2727,10 @@ export class OneBotRuntime {
     await this.clearPrivatePostPendingPublishMode(draftKey);
     await this.clearPrivatePostPending(draftKey);
     await this.clearPrivatePostDraft(draftKey);
+    if (!this.interactionFence.isCurrent(permit)) {
+      await this.clearStagedPrivatePostAttachments(staged.uploadedKeys);
+      throw new BotWorkflowError("校园墙已暂停或归档", 409);
+    }
     const text = (semantic?.intent === "post" && semantic.text ? semantic.text : body).trim();
     const attachments = staged.attachments;
     const history: PrivatePostHistoryEntry[] = [];
@@ -2690,6 +2820,10 @@ export class OneBotRuntime {
     semantic?: PrivatePostSemanticResult | undefined;
   }) {
     await this.ensurePrivatePostingAllowed(bot.tenantId, userQqUin);
+    const permit = this.interactionFence.snapshot(bot.tenantId);
+    if (!this.interactionFence.isCurrent(permit)) {
+      return false;
+    }
 
     const rawDraftText = extractOneBotPlainText(event.message, event.raw_message).trim();
     const draftText = semantic?.intent === "post" ? this.extractSemanticAppendText(target.text, semantic.text) : rawDraftText;
@@ -2708,7 +2842,7 @@ export class OneBotRuntime {
 
     if (imageSegments.length > 0) {
       try {
-        staged = await this.stagePrivatePostAttachments(bot, event);
+        staged = await this.stagePrivatePostAttachments(bot, event, permit);
       } catch (error) {
         await this.sendPrivateMessage(botQqUin, userQqUin, toErrorMessage(error)).catch(() => undefined);
         return false;
@@ -2724,6 +2858,11 @@ export class OneBotRuntime {
         await this.sendPrivateMessage(botQqUin, userQqUin, "图片最多 9 张，请删减后再继续发送。");
         return false;
       }
+    }
+
+    if (!this.interactionFence.isCurrent(permit)) {
+      if (staged) await this.clearStagedPrivatePostAttachments(staged.uploadedKeys);
+      return false;
     }
 
     if (draftText.length > 0) {
@@ -3001,6 +3140,7 @@ export class OneBotRuntime {
   private async stagePrivatePostAttachments(
     bot: { qqUin: bigint; tenantId: string },
     event: OneBotMessageEvent,
+    permit: TenantInteractionPermit,
   ): Promise<{ attachments: PostAttachment[]; uploadedKeys: string[] }> {
     const imageSegments = extractOneBotImageSegments(event.message);
     if (imageSegments.length === 0) {
@@ -3030,8 +3170,13 @@ export class OneBotRuntime {
 
     try {
       for (const segment of imageSegments) {
+        if (!this.interactionFence.isCurrent(permit)) {
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
         const source = await this.resolvePrivatePostImageSource(
           bot.qqUin.toString(),
+          bot.tenantId,
+          permit,
           segment,
           sourceFetchLimits,
         );
@@ -3041,14 +3186,27 @@ export class OneBotRuntime {
         if (!sizeValidation.ok) {
           throw new BotWorkflowError(sizeValidation.message, sizeValidation.status);
         }
-        const attachment = await uploadAttachmentBytes({
-          config: this.config,
-          tenantId: bot.tenantId,
-          kind: "image",
-          contentType: source.contentType,
-          fileName,
-          body: compressed,
+        const uploaded = await runWithActiveTenantLease(prisma, bot.tenantId, async () => {
+          if (!this.interactionFence.isCurrent(permit)) {
+            throw new BotWorkflowError("校园墙已暂停或归档", 409);
+          }
+          return uploadAttachmentBytes({
+            config: this.config!,
+            tenantId: bot.tenantId,
+            kind: "image",
+            contentType: source.contentType,
+            fileName,
+            body: compressed,
+          });
         });
+        if (!uploaded.active) {
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
+        const attachment = uploaded.value;
+        if (!this.interactionFence.isCurrent(permit)) {
+          await deleteAttachmentObjects(this.config!, [attachment.key]).catch(() => undefined);
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
         attachments.push(attachment);
         uploadedKeys.push(attachment.key);
       }
@@ -3065,6 +3223,8 @@ export class OneBotRuntime {
 
   private async resolvePrivatePostImageSource(
     botQqUin: string,
+    tenantId: string,
+    permit: TenantInteractionPermit,
     segment: { data?: Record<string, unknown> },
     limits: PrivatePostImageFetchLimits,
   ) {
@@ -3072,24 +3232,27 @@ export class OneBotRuntime {
     const fileName = normalizeImageFileName(data.file_name ?? data.filename ?? data.name ?? data.file ?? data.url);
     const directSource = typeof (data.url ?? data.file) === "string" ? String(data.url ?? data.file).trim() : null;
     if (directSource?.startsWith("base64://")) {
-      return await fetchPrivatePostImage(directSource, fileName, limits);
+      return await this.fetchPrivatePostImageWithLease(tenantId, permit, directSource, fileName, limits);
     }
 
     const directUrl = readImageUrlCandidate(data.url ?? data.file);
     if (directUrl) {
-      return await fetchPrivatePostImage(directUrl, fileName, limits);
+      return await this.fetchPrivatePostImageWithLease(tenantId, permit, directUrl, fileName, limits);
     }
 
     const fileToken = readImageTokenCandidate(data.file);
     if (fileToken) {
       try {
         const response = await this.callAction(botQqUin, "get_image", { file: fileToken });
+        if (!this.interactionFence.isCurrent(permit)) {
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
         const resolvedUrl = extractImageUrlFromOneBotResponse(response);
         if (resolvedUrl) {
-          return await fetchPrivatePostImage(resolvedUrl, fileName, limits);
+          return await this.fetchPrivatePostImageWithLease(tenantId, permit, resolvedUrl, fileName, limits);
         }
       } catch (error) {
-        if (error instanceof BotWorkflowError && error.statusCode === 413) {
+        if (error instanceof BotWorkflowError && [409, 413].includes(error.statusCode)) {
           throw error;
         }
         this.logger.debug({ error, botQqUin }, "onebot get_image fallback failed");
@@ -3099,29 +3262,56 @@ export class OneBotRuntime {
     throw new BotWorkflowError("无法读取图片附件，请重新发送图片", 400);
   }
 
-  private async resolveReviewGroupImageSource(botQqUin: string, segment: { data?: Record<string, unknown> }) {
+  private async fetchPrivatePostImageWithLease(
+    tenantId: string,
+    permit: TenantInteractionPermit,
+    source: string,
+    fileName: string | undefined,
+    limits: PrivatePostImageFetchLimits,
+  ) {
+    const fetched = await runWithActiveTenantLease(prisma, tenantId, async () => {
+      if (!this.interactionFence.isCurrent(permit)) {
+        throw new BotWorkflowError("校园墙已暂停或归档", 409);
+      }
+      return fetchPrivatePostImage(source, fileName, limits);
+    });
+    if (!fetched.active || !this.interactionFence.isCurrent(permit)) {
+      throw new BotWorkflowError("校园墙已暂停或归档", 409);
+    }
+    return fetched.value;
+  }
+
+  private async resolveReviewGroupImageSource(
+    botQqUin: string,
+    tenantId: string,
+    permit: TenantInteractionPermit,
+    segment: { data?: Record<string, unknown> },
+  ) {
     const data = segment.data ?? {};
     const fileName = normalizeImageFileName(data.file_name ?? data.filename ?? data.name ?? data.file ?? data.url);
     const directSource = typeof (data.url ?? data.file) === "string" ? String(data.url ?? data.file).trim() : null;
     if (directSource?.startsWith("base64://")) {
-      return await fetchPrivatePostImage(directSource, fileName);
+      return await this.fetchPrivatePostImageWithLease(tenantId, permit, directSource, fileName, defaultPrivatePostImageFetchLimits);
     }
 
     const directUrl = readImageUrlCandidate(data.url ?? data.file);
     if (directUrl) {
-      return await fetchPrivatePostImage(directUrl, fileName);
+      return await this.fetchPrivatePostImageWithLease(tenantId, permit, directUrl, fileName, defaultPrivatePostImageFetchLimits);
     }
 
     const fileToken = readImageTokenCandidate(data.file);
     if (fileToken) {
       try {
         const response = await this.callAction(botQqUin, "get_image", { file: fileToken });
+        if (!this.interactionFence.isCurrent(permit)) {
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
         const resolvedUrl = extractImageUrlFromOneBotResponse(response);
         if (resolvedUrl) {
-          return await fetchPrivatePostImage(resolvedUrl, fileName);
+          return await this.fetchPrivatePostImageWithLease(tenantId, permit, resolvedUrl, fileName, defaultPrivatePostImageFetchLimits);
         }
       } catch (error) {
-        if (error instanceof BotWorkflowError && error.statusCode === 413) {
+        if (error instanceof BotWorkflowError && [409, 413].includes(error.statusCode)) {
           throw error;
         }
         this.logger.debug({ error, botQqUin }, "onebot get_image fallback failed");
@@ -3495,6 +3685,9 @@ export class OneBotRuntime {
       try {
         post = await prisma.$transaction(
           async (tx) => {
+            if (!await lockActiveTenantRuntime(tx, bot.tenantId)) {
+              throw new BotWorkflowError("校园墙已暂停或归档", 409);
+            }
             if (initialStatus === "pending_approval") {
               const pendingPostLimit = await readTenantPendingPostLimit(tx, bot.tenantId);
               if (pendingPostLimit > 0) {
@@ -3906,8 +4099,12 @@ export class OneBotRuntime {
           await this.sendGroupMessage(botQqUin, groupId, reviewHelp);
           return;
         }
-        await enqueuePublishFanoutByDisplayId(this.queue, bot.tenantId, displayId, operatorQqUin);
-        await this.sendGroupMessage(botQqUin, groupId, formatRequeue(displayId, stylishEnabled));
+        const queuedAttempts = await enqueuePublishFanoutByDisplayId(this.queue, bot.tenantId, displayId, operatorQqUin);
+        await this.sendGroupMessage(
+          botQqUin,
+          groupId,
+          queuedAttempts.length > 0 ? formatRequeue(displayId, stylishEnabled) : `#${displayId} 没有可用的发布目标，未加入发布队列`,
+        );
         return;
       }
 
@@ -3954,8 +4151,9 @@ export class OneBotRuntime {
             return;
           }
           images = [];
+          const permit = this.interactionFence.snapshot(bot.tenantId);
           for (const segment of imageSegments) {
-            const source = await this.resolveReviewGroupImageSource(botQqUin, segment);
+            const source = await this.resolveReviewGroupImageSource(botQqUin, bot.tenantId, permit, segment);
             images.push({ name: source.fileName || "image.jpg", bytes: source.bytes });
           }
         }
@@ -3985,16 +4183,19 @@ export class OneBotRuntime {
           return;
         }
         const endsAt = new Date(PERMANENT_BAN_ENDS_AT);
-        let result;
+        let banned;
         try {
-          result = await upsertBanRecord({
-            tenantId: bot.tenantId,
-            userId: targetUser.id,
-            operatorId: operator.id,
-            comment: parsed.reason,
-            endsAt,
-            source: "review_group",
-          });
+          banned = await runWithActiveTenantLease(prisma, bot.tenantId, async (transaction) => ({
+            result: await upsertBanRecord({
+              tenantId: bot.tenantId,
+              userId: targetUser.id,
+              operatorId: operator.id,
+              comment: parsed.reason,
+              endsAt,
+              source: "review_group",
+            }, transaction),
+            tenant: await transaction.tenant.findUnique({ where: { id: bot.tenantId }, select: { name: true } }),
+          }));
         } catch (error) {
           const response = banManagementErrorResponse(error);
           if (response) {
@@ -4003,6 +4204,10 @@ export class OneBotRuntime {
           }
           throw error;
         }
+        if (!banned.active) {
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
+        const result = banned.value.result;
         await this.sendGroupMessage(
           botQqUin,
           groupId,
@@ -4011,8 +4216,7 @@ export class OneBotRuntime {
             : `已更新 QQ ${parsed.qqUin} 的封禁信息，理由：${parsed.reason}`,
         );
         if (result.action === "created") {
-          const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId } });
-          const tenantName = tenant?.name ?? "校园墙";
+          const tenantName = banned.value.tenant?.name ?? "校园墙";
           await this.sendPrivateMessageViaTenantBots(bot.tenantId, parsed.qqUin, formatBanNotify(tenantName, parsed.reason, endsAt)).catch((error) => {
             this.logger.warn({ error, qqUin: parsed.qqUin }, "failed to send ban notification");
           });
@@ -4035,14 +4239,17 @@ export class OneBotRuntime {
           await this.sendGroupMessage(botQqUin, groupId, formatUnbanNotFound(qqUin, stylishEnabled));
           return;
         }
-        let result;
+        let unbanned;
         try {
-          result = await endActiveBanRecords({
-            tenantId: bot.tenantId,
-            userId: targetUser.id,
-            operatorId: operator.id,
-            source: "review_group",
-          });
+          unbanned = await runWithActiveTenantLease(prisma, bot.tenantId, async (transaction) => ({
+            result: await endActiveBanRecords({
+              tenantId: bot.tenantId,
+              userId: targetUser.id,
+              operatorId: operator.id,
+              source: "review_group",
+            }, transaction),
+            tenant: await transaction.tenant.findUnique({ where: { id: bot.tenantId }, select: { name: true } }),
+          }));
         } catch (error) {
           const response = banManagementErrorResponse(error);
           if (response) {
@@ -4051,14 +4258,17 @@ export class OneBotRuntime {
           }
           throw error;
         }
+        if (!unbanned.active) {
+          throw new BotWorkflowError("校园墙已暂停或归档", 409);
+        }
+        const result = unbanned.value.result;
         if (!result.ended) {
           await this.sendGroupMessage(botQqUin, groupId, formatUnbanNotFound(qqUin, stylishEnabled));
           return;
         }
         await this.sendGroupMessage(botQqUin, groupId, formatUnbanSuccess(qqUin, stylishEnabled));
         // 发私信通知用户已解封
-        const tenant = await prisma.tenant.findUnique({ where: { id: bot.tenantId } });
-        const tenantName = tenant?.name ?? "校园墙";
+        const tenantName = unbanned.value.tenant?.name ?? "校园墙";
         await this.sendPrivateMessageViaTenantBots(bot.tenantId, qqUin, formatUnbanNotify(tenantName)).catch((error) => {
           this.logger.warn({ error, qqUin }, "failed to send unban notification");
         });
@@ -4079,33 +4289,33 @@ export class OneBotRuntime {
           return;
         }
 
-        // 获取 QZone cookies
-        const session = await prisma.botSession.findFirst({
-          where: {
-            botAccountId: bot.id,
-            type: "qzone",
-            domain: qzoneCookieDomain,
-          },
-          orderBy: { refreshedAt: "desc" },
-        });
-
-        if (!session || session.healthStatus !== "available") {
-          await this.sendGroupMessage(botQqUin, groupId, formatBotRecallFailed("机器人 QZone 登录态不可用", stylishEnabled));
-          return;
-        }
-
-        const cookies = decryptJson(session.cookies) as Record<string, string> | null;
-        if (!cookies) {
-          await this.sendGroupMessage(botQqUin, groupId, formatBotRecallFailed("QZone cookies 解析失败", stylishEnabled));
-          return;
-        }
-
         try {
-          await setQZoneEmotionPrivate({
-            targetName: bot.displayName ?? `QQ ${botQqUin}`,
-            externalId: qzoneTid,
-            cookies,
+          const recall = await runWithActiveTenantLease(prisma, bot.tenantId, async (transaction) => {
+            const session = await transaction.botSession.findFirst({
+              where: {
+                botAccountId: bot.id,
+                type: "qzone",
+                domain: qzoneCookieDomain,
+              },
+              orderBy: { refreshedAt: "desc" },
+            });
+            if (!session || session.healthStatus !== "available") {
+              throw new BotWorkflowError("机器人 QZone 登录态不可用", 409);
+            }
+            const cookies = decryptJson(session.cookies) as Record<string, string> | null;
+            if (!cookies) {
+              throw new BotWorkflowError("QZone cookies 解析失败", 502);
+            }
+            await setQZoneEmotionPrivate({
+              targetName: bot.displayName ?? `QQ ${botQqUin}`,
+              externalId: qzoneTid,
+              cookies,
+            });
+            return true;
           });
+          if (!recall.active) {
+            throw new BotWorkflowError("校园墙已暂停或归档", 409);
+          }
           await this.sendGroupMessage(botQqUin, groupId, formatBotRecallSuccess(stylishEnabled));
         } catch (error) {
           const message = error instanceof Error ? error.message : "未知错误";
@@ -4247,6 +4457,11 @@ export class OneBotRuntime {
       this.privatePostAggregateBuffers.delete(key);
       return;
     }
+    const permit = this.interactionFence.snapshot(buffer.tenantId);
+    if (!this.interactionFence.isCurrent(permit)) {
+      this.clearPrivatePostAggregateBuffer(key);
+      return;
+    }
     this.clearPrivatePostAggregateBuffer(key);
     if (this.privatePostDrafts.has(key) || this.privatePostPendingPublishModes.has(key) || this.privatePostPendingModes.has(key) || this.privatePostPendingConfirms.has(key)) {
       return;
@@ -4261,6 +4476,9 @@ export class OneBotRuntime {
       imageCount,
       logger: this.logger,
     });
+    if (!this.interactionFence.isCurrent(permit)) {
+      return;
+    }
     if (semantic.intent === "post" && semantic.confidence >= 0.55 && (semantic.text || imageCount > 0)) {
       const mergedEvent = mergePrivatePostAggregateEvents(buffer.events, messageText);
       const registrationNotice = await this.ensurePrivatePostRegistration({
@@ -4298,6 +4516,9 @@ export class OneBotRuntime {
     }
 
     if (buffer.bot.reviewGroupId) {
+      if (!this.interactionFence.isCurrent(permit)) {
+        return;
+      }
       for (const entry of buffer.messages) {
         this.bufferPrivateForwardMessage({
           bot: buffer.bot,
@@ -4311,6 +4532,9 @@ export class OneBotRuntime {
     }
     if (!buffer.suppressAutoReply && this.shouldSendPrivateAutoReply(buffer.bot.id, buffer.userQqUin, buffer.bot.userMessageReplyCooldownSeconds)) {
       const stylishEnabled = await readTenantBotStylishMessagesEnabled(prisma, buffer.tenantId);
+      if (!this.interactionFence.isCurrent(permit)) {
+        return;
+      }
       await this.sendPrivateMessage(buffer.botQqUin, buffer.userQqUin, formatConfiguredPrivateHelp(buffer.bot.userMessageReply, stylishEnabled)).catch(() => undefined);
     }
   }
@@ -4331,10 +4555,10 @@ export class OneBotRuntime {
     segments?: OneBotMessageSegment[];
   }) {
     // 异步递增私信接收计数
-    prisma.botAccount.update({
+    runWithActiveTenantLease(prisma, bot.tenantId, (transaction) => transaction.botAccount.update({
       where: { id: bot.id },
       data: { privateMessagesReceived: { increment: 1 } },
-    }).catch((error) => {
+    })).catch((error) => {
       this.logger.warn({ error, botId: bot.id }, "failed to increment private message counter");
     });
 
@@ -4383,6 +4607,7 @@ export class OneBotRuntime {
 
     // 提前从 Map 删除，防止重复触发
     this.privateForwardBuffers.delete(key);
+    const permit = this.interactionFence.snapshot(buffer.tenantId);
 
     try {
       // 重新获取 bot 信息以获取最新的 reviewGroupId
@@ -4444,8 +4669,8 @@ export class OneBotRuntime {
         msgId = this.extractMessageId(fallbackData);
       }
 
-      if (msgId) {
-        this.storePrivateForwardMapping(msgId, buffer.userQqUin, buffer.userNickname, buffer.botQqUin);
+      if (msgId && this.interactionFence.isCurrent(permit)) {
+        this.storePrivateForwardMapping(msgId, buffer.tenantId, buffer.userQqUin, buffer.userNickname, buffer.botQqUin);
       }
     } catch (error) {
       this.logger.warn({ error, botQqUin: buffer.botQqUin, userQqUin: buffer.userQqUin }, "转发私聊消息到审核群失败");
@@ -4607,12 +4832,18 @@ export class OneBotRuntime {
 
     clearTimeout(pending.timer);
     this.pendingActions.delete(response.echo);
+    if (!this.interactionFence.isCurrent(pending.permit)) {
+      pending.reject(new BotWorkflowError("校园墙已暂停或归档", 409));
+      return;
+    }
     pending.resolve(response);
   }
 
   private findConnection(botQqUin: string) {
     const candidates = Array.from(this.connections).filter((connection) => (
-      connection.selfId === botQqUin && connection.socket.readyState === 1
+      connection.selfId === botQqUin
+      && connection.socket.readyState === 1
+      && this.interactionFence.isCurrent(connection.permit)
     ));
     candidates.sort((left, right) => {
       const healthyDelta = Number(this.isHealthyConnection(right)) - Number(this.isHealthyConnection(left));
@@ -4638,6 +4869,7 @@ export class OneBotRuntime {
         connectionToken: token,
         enabled: true,
         platform: "onebot",
+        tenant: tenantRuntimeRelationFilter,
       },
       select: {
         id: true,
@@ -4651,44 +4883,60 @@ export class OneBotRuntime {
     return bot;
   }
 
+  private async ensureConnectionTenantActive(connection: OneBotConnection) {
+    if (
+      this.connections.has(connection)
+      && this.interactionFence.isCurrent(connection.permit)
+      && await isTenantRuntimeActive(prisma, connection.tenantId)
+      && this.connections.has(connection)
+      && this.interactionFence.isCurrent(connection.permit)
+    ) {
+      return true;
+    }
+    this.disconnectTenant(connection.tenantId);
+    this.logger.info({ tenantId: connection.tenantId, botAccountId: connection.botAccountId }, "onebot interaction blocked for inactive tenant");
+    return false;
+  }
+
   private async markBotSeen(connection: OneBotConnection) {
     const now = new Date();
-    await prisma.botAccount.update({
-      where: {
-        id: connection.botAccountId,
-      },
-      data: {
-        lastSeenAt: now,
-      },
-    });
-    // First successful bot connection marks the wall as ready: the operator has
-    // proven control of the wall QQ via NapCat, so the workspace can unlock.
-    // readyAt is set once and never cleared, so a temporary disconnect later
-    // does not lock the operator back out.
-    const tenant = await prisma.tenant.findUnique({
-      where: { id: connection.tenantId },
-      select: { readyAt: true, archiveWarningAt: true },
-    });
-    if (tenant && tenant.readyAt === null) {
-      await prisma.tenant.update({
-        where: { id: connection.tenantId },
-        data: { readyAt: now, archiveWarningAt: null },
+    const leased = await runWithActiveTenantLease(prisma, connection.tenantId, async (transaction) => {
+      if (!this.connections.has(connection) || !this.interactionFence.isCurrent(connection.permit)) {
+        return false;
+      }
+      await transaction.botAccount.update({
+        where: { id: connection.botAccountId },
+        data: { lastSeenAt: now },
       });
-      await writeAuditLog({
-        tenantId: connection.tenantId,
-        actorId: null,
-        action: "tenant.ready",
-        targetType: "tenant",
-        targetId: connection.tenantId,
-        detail: { botAccountId: connection.botAccountId, selfId: connection.selfId },
-      }).catch((error) => this.logger.warn({ error, tenantId: connection.tenantId }, "failed to write tenant.ready audit log"));
+      const tenant = await transaction.tenant.findUnique({
+        where: { id: connection.tenantId },
+        select: { readyAt: true, archiveWarningAt: true },
+      });
+      if (tenant && tenant.readyAt === null) {
+        await transaction.tenant.update({
+          where: { id: connection.tenantId },
+          data: { readyAt: now, archiveWarningAt: null },
+        });
+        await writeAuditLog({
+          tenantId: connection.tenantId,
+          actorId: null,
+          action: "tenant.ready",
+          targetType: "tenant",
+          targetId: connection.tenantId,
+          detail: { botAccountId: connection.botAccountId, selfId: connection.selfId },
+        }, transaction);
+        return "ready" as const;
+      }
+      if (tenant && tenant.archiveWarningAt !== null) {
+        await transaction.tenant.update({
+          where: { id: connection.tenantId },
+          data: { archiveWarningAt: null },
+        });
+      }
+      return true;
+    });
+    if (leased.active && leased.value === "ready") {
       this.logger.info({ tenantId: connection.tenantId, botAccountId: connection.botAccountId }, "tenant marked ready after first bot connection");
-    } else if (tenant && tenant.archiveWarningAt !== null) {
-      // A previously ready tenant reconnecting clears any pending archive warning.
-      await prisma.tenant.update({
-        where: { id: connection.tenantId },
-        data: { archiveWarningAt: null },
-      });
     }
   }
 
@@ -4733,15 +4981,15 @@ export class OneBotRuntime {
     await this.sendGroupMessage(botQqUin, groupId, formatPrivateReplySent(target.userNickname, target.userQqUin, stylishEnabled));
 
     // 异步递增管理员回复计数
-    prisma.botAccount.update({
+    runWithActiveTenantLease(prisma, bot.tenantId, (transaction) => transaction.botAccount.update({
       where: { id: bot.id },
       data: { adminRepliesSent: { increment: 1 } },
-    }).catch((error) => {
+    })).catch((error) => {
       this.logger.warn({ error, botId: bot.id }, "failed to increment admin reply counter");
     });
   }
 
-  private storePrivateForwardMapping(msgId: string, userQqUin: string, userNickname: string, botQqUin: string) {
+  private storePrivateForwardMapping(msgId: string, tenantId: string, userQqUin: string, userNickname: string, botQqUin: string) {
     if (this.privateForwardMsgIdMap.size >= OneBotRuntime.MAX_FORWARD_MSG_ID_MAP_SIZE) {
       // 删除最早的一条记录
       const firstKey = this.privateForwardMsgIdMap.keys().next().value;
@@ -4749,7 +4997,7 @@ export class OneBotRuntime {
         this.privateForwardMsgIdMap.delete(firstKey);
       }
     }
-    this.privateForwardMsgIdMap.set(msgId, { userQqUin, userNickname, botQqUin });
+    this.privateForwardMsgIdMap.set(msgId, { tenantId, userQqUin, userNickname, botQqUin });
   }
 
   private extractMessageId(data: unknown): string | null {
@@ -4879,7 +5127,6 @@ export class OneBotRuntime {
 }
 
 async function enqueuePublishFanoutByDisplayId(queue: RuntimeQueue, tenantId: string, displayId: number, operatorQqUin: string) {
-  const { enqueuePublishFanout } = await import("./publishing");
   const { operator } = await requireBotTenantRole(tenantId, operatorQqUin, "reviewer");
   const post = await prisma.post.findFirst({
     where: {
@@ -4890,7 +5137,7 @@ async function enqueuePublishFanoutByDisplayId(queue: RuntimeQueue, tenantId: st
   if (!post) {
     throw new BotWorkflowError(`稿件 #${displayId} 不存在`, 404);
   }
-  await enqueuePublishFanout(queue, tenantId, post.id, operator.id);
+  return requeuePublishFanout(queue, tenantId, post.id, operator.id);
 }
 
 function formatDateTime(date: Date) {

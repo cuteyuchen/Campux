@@ -16,6 +16,7 @@ import {
   updateTenantAfterAdminCheck,
 } from "../lib/tenant-membership-removal";
 import { normalizeTenantHost } from "../lib/tenant-host";
+import { lockTenantRuntime } from "../lib/tenant-runtime-lease";
 import {
   buildTenantDomainHost,
   hostIsUnderTenantSuffix,
@@ -30,6 +31,8 @@ import {
 } from "../lib/tenant-domain";
 import { buildUserContainsSearch } from "../lib/user-search";
 import type { RuntimeQueue } from "../runtime/queue";
+import type { OneBotRuntime } from "../runtime/onebot";
+import type { EventBus, PluginEvent } from "@campux/plugin";
 
 const tenantStatusSchema = z.enum(["active", "paused", "archived"]);
 
@@ -95,15 +98,20 @@ type SystemTenantRecord = {
   archiveWarningAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
-  botAccounts?: Array<{
+  botAccounts: Array<{
     id: string;
+    platform: string;
     qqUin: bigint;
     displayName: string;
     enabled: boolean;
     reviewGroupId: string | null;
     lastSeenAt: Date | null;
+    sessions: Array<{
+      healthStatus: string;
+    }>;
     publishTargets: Array<{
       id: string;
+      type: string;
       displayName: string;
       enabled: boolean;
       required: boolean;
@@ -116,7 +124,9 @@ type SystemTenantRecord = {
   };
 };
 
-function toSystemTenant(tenant: SystemTenantRecord) {
+type BotConnectionStatusProvider = Pick<OneBotRuntime, "getBotConnectionStatus">;
+
+export function toSystemTenant(tenant: SystemTenantRecord, oneBot?: BotConnectionStatusProvider) {
   return {
     id: tenant.id,
     slug: tenant.slug,
@@ -131,18 +141,27 @@ function toSystemTenant(tenant: SystemTenantRecord) {
     botAccountCount: tenant._count.botAccounts,
     postCount: tenant._count.posts,
     memberCount: tenant._count.memberships,
-    bots: (tenant.botAccounts ?? []).map((bot) => ({
+    bots: tenant.botAccounts.map((bot) => ({
       id: bot.id,
+      platform: bot.platform,
       qqUin: bot.qqUin.toString(),
       displayName: bot.displayName,
       enabled: bot.enabled,
       reviewGroupId: bot.reviewGroupId,
       lastSeenAt: bot.lastSeenAt?.toISOString() ?? null,
+      connection: bot.platform === "official_qq"
+        ? { online: bot.enabled, connectionCount: bot.enabled ? 1 : 0 }
+        : oneBot?.getBotConnectionStatus(bot.qqUin.toString()) ?? { online: false, connectionCount: 0 },
       publishTargets: bot.publishTargets.map((target) => ({
         id: target.id,
         displayName: target.displayName,
         enabled: target.enabled,
         required: target.required,
+        status: !bot.enabled || !target.enabled
+          ? "disabled" as const
+          : target.type !== "qzone" || bot.sessions[0]?.healthStatus === "available"
+            ? "ready" as const
+            : "unavailable" as const,
       })),
     })),
   };
@@ -205,7 +224,7 @@ async function assertHostNotReserved(host: string | null, reply: FastifyReply, o
   }
 }
 
-async function listSystemTenants(context: PlatformContext) {
+async function listSystemTenants(context: PlatformContext, oneBot?: OneBotRuntime) {
   const tenantIds = manageableTenantIds(context);
   const tenants = await prisma.tenant.findMany({
     where: tenantIds === null ? {} : { id: { in: tenantIds } },
@@ -216,6 +235,12 @@ async function listSystemTenants(context: PlatformContext) {
             orderBy: {
               displayName: "asc",
             },
+          },
+          sessions: {
+            where: { type: "qzone" },
+            orderBy: { refreshedAt: "desc" },
+            take: 1,
+            select: { healthStatus: true },
           },
         },
         orderBy: {
@@ -233,7 +258,7 @@ async function listSystemTenants(context: PlatformContext) {
     orderBy: [{ status: "asc" }, { createdAt: "asc" }],
   });
 
-  return tenants.map(toSystemTenant);
+  return tenants.map((tenant) => toSystemTenant(tenant, oneBot));
 }
 
 function tenantDomainSuffixForResponse(config: CampuxConfig) {
@@ -247,7 +272,7 @@ function tenantDomainSuffixForResponse(config: CampuxConfig) {
   }
 }
 
-export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, config: CampuxConfig) {
+export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, config: CampuxConfig, oneBot?: OneBotRuntime) {
   app.get("/api/system/settings", async (request, reply) => {
     const context = await requirePlatformAdmin(request, reply);
     if (!isSystemOperator(context)) {
@@ -305,7 +330,7 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
     const context = await requirePlatformAdmin(request, reply);
 
     return {
-      tenants: await listSystemTenants(context),
+      tenants: await listSystemTenants(context, oneBot),
       tenantDomainSuffix: tenantDomainSuffixForResponse(config),
     };
   });
@@ -458,8 +483,15 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
       },
     });
 
+    // 触发插件事件：租户创建
+    const events = app.pluginEvents as EventBus | undefined;
+    events?.emit({
+      type: "tenant:created",
+      tenantId: tenant.id,
+    });
+
     return {
-      tenants: await listSystemTenants(context),
+      tenants: await listSystemTenants(context, oneBot),
       tenantDomainSuffix: tenantDomainSuffixForResponse(config),
     };
   });
@@ -564,11 +596,30 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
         ...(cloudflareDnsRecordId ? { cloudflareDnsRecordId } : {}),
       },
     };
-    const persistTenant = () => body.status === "active"
-      ? retryTransactionSerializationFailures(
-        () => prisma.$transaction(
-          async (tx) => {
-            const tenant = await updateTenantAfterAdminCheck({
+    let runtimeTransitionAttempted = false;
+    if (body.status !== undefined && body.status !== "active") {
+      // Fence local OneBot work before waiting on an in-flight durable lease.
+      // If persistence fails, the catch path below reconciles the fence to the
+      // authoritative persisted status.
+      runtimeTransitionAttempted = true;
+      oneBot?.disconnectTenant(params.tenantId);
+    }
+    const persistTenant = () => retryTransactionSerializationFailures(
+      () => prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const lockedTenant = await lockTenantRuntime(tx, params.tenantId);
+        if (!lockedTenant) {
+          throw new Error("tenant not found");
+        }
+        const currentStatus = lockedTenant.status;
+        const statusChanged = body.status !== undefined && currentStatus !== body.status;
+        if (statusChanged) {
+          runtimeTransitionAttempted = true;
+          if (body.status === "active") {
+            oneBot?.activateTenant(params.tenantId);
+          }
+        }
+        const tenant = body.status === "active"
+          ? await updateTenantAfterAdminCheck({
               countAdmins: () => tx.tenantMembership.count({
                 where: { tenantId: params.tenantId, role: "admin" },
               }),
@@ -576,22 +627,16 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
                 where: { id: params.tenantId },
                 data: updateData,
               }),
+            })
+          : await tx.tenant.update({
+              where: { id: params.tenantId },
+              data: updateData,
             });
-            await writeAuditLog(auditInput, tx);
-            return tenant;
-          },
-          { isolationLevel: TransactionIsolationLevel.Serializable },
-        ),
-        isTransactionSerializationFailure,
-      )
-      : prisma.$transaction(async (tx) => {
-        const tenant = await tx.tenant.update({
-          where: { id: params.tenantId },
-          data: updateData,
-        });
         await writeAuditLog(auditInput, tx);
         return tenant;
-      });
+      }, { isolationLevel: TransactionIsolationLevel.Serializable }),
+      isTransactionSerializationFailure,
+    );
 
     const appliedDnsChange = dnsChange;
     try {
@@ -602,6 +647,17 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
         })
         : persistTenant());
     } catch (error) {
+      if (runtimeTransitionAttempted) {
+        const persisted = await prisma.tenant.findUnique({
+          where: { id: params.tenantId },
+          select: { status: true },
+        });
+        if (persisted?.status === "active") {
+          oneBot?.activateTenant(params.tenantId);
+        } else if (persisted) {
+          oneBot?.disconnectTenant(params.tenantId);
+        }
+      }
       if (error instanceof TenantDomainCompensationError) {
         request.log.error({
           err: error.compensationError,
@@ -627,8 +683,25 @@ export function registerSystemRoutes(app: FastifyInstance, queue: RuntimeQueue, 
       throw error;
     }
 
+    // 触发插件事件：租户状态变更
+    if (body.status !== undefined) {
+      const events = app.pluginEvents as EventBus | undefined;
+      const eventMap: Record<string, PluginEvent["type"]> = {
+        active: "tenant:activated",
+        paused: "tenant:paused",
+        archived: "tenant:archived",
+      };
+      const eventType = eventMap[body.status];
+      if (eventType) {
+        events?.emit({
+          type: eventType,
+          tenantId: params.tenantId,
+        });
+      }
+    }
+
     return {
-      tenants: await listSystemTenants(context),
+      tenants: await listSystemTenants(context, oneBot),
       tenantDomainSuffix: tenantDomainSuffixForResponse(config),
     };
   });

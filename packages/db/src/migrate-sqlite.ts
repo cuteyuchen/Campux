@@ -20,6 +20,8 @@ const SQLITE_BASELINE_NAME = "0_sqlite_baseline";
 const FIRST_PRIVATE_MESSAGE_MIGRATION_NAME = "20260713120000_auto_register_on_first_private_message";
 const PUBLISH_IMMEDIATELY_MIGRATION_NAME = "20260722120000_add_post_publish_immediately";
 const BOT_HEALTH_INBOX_MIGRATION_NAME = "20260827120000_add_bot_health_and_message_inbox";
+const LAST_PUBLISH_STARTED_AT_MIGRATION_NAME = "20260724090000_add_bot_last_publish_started_at";
+const REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME = "20260815120000_add_bot_review_queue_reminder_at_all";
 const OLD_PRIVATE_MESSAGE_REPLY = `发送 #注册账号 可以用当前 QQ 注册本校园墙账号。
 发送 #重置密码 可以重置你的登录密码。`;
 const NEW_PRIVATE_MESSAGE_REPLY = `首次私聊会自动注册 Campux 账号。
@@ -75,6 +77,38 @@ function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
+function sqliteTableExists(db: Database, tableName: string) {
+  return db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ${sqlStringLiteral(tableName)}`)
+    .get() !== null;
+}
+
+function sqliteColumnInfo(db: Database, tableName: string, columnName: string) {
+  return db
+    .query(`SELECT "name", "dflt_value" FROM pragma_table_info(${sqlStringLiteral(tableName)}) WHERE "name" = ${sqlStringLiteral(columnName)}`)
+    .get() as { name: string; dflt_value: string | null } | null;
+}
+
+function isBaselineEmbeddedMigration(db: Database, migrationName: string) {
+  switch (migrationName) {
+    case FIRST_PRIVATE_MESSAGE_MIGRATION_NAME: {
+      const column = sqliteColumnInfo(db, "BotAccount", "userMessageReply");
+      const newDefault = `DEFAULT ${sqlStringLiteral(NEW_PRIVATE_MESSAGE_REPLY)}`;
+      return column?.dflt_value === newDefault || column?.dflt_value === sqlStringLiteral(newDefault);
+    }
+    case PUBLISH_IMMEDIATELY_MIGRATION_NAME:
+      return sqliteColumnInfo(db, "Post", "publishImmediately") !== null;
+    case BOT_HEALTH_INBOX_MIGRATION_NAME:
+      return sqliteTableExists(db, "BotHealthIncident") && sqliteTableExists(db, "BotMessageInbox");
+    case LAST_PUBLISH_STARTED_AT_MIGRATION_NAME:
+      return sqliteColumnInfo(db, "BotAccount", "lastPublishStartedAt") !== null;
+    case REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME:
+      return sqliteColumnInfo(db, "BotAccount", "reviewQueueReminderAtAll") !== null;
+    default:
+      return false;
+  }
+}
+
 function applyFirstPrivateMessageSqliteMigration(
   db: Database,
   doneNames: Set<string>,
@@ -109,7 +143,13 @@ function applyFirstPrivateMessageSqliteMigration(
   db.exec("PRAGMA foreign_keys=OFF");
   db.exec("BEGIN");
   try {
-    if (botTable.sql.includes(oldDefault)) {
+    // The DDL stored in sqlite_master may use ' literals or '' escaped form; we check by SQL content.
+    const currentDefault = (
+      db.query(`SELECT "dflt_value" FROM pragma_table_info('BotAccount') WHERE name = 'userMessageReply'`).get() as { dflt_value: string | null } | null
+    )?.dflt_value ?? null;
+    if (currentDefault === newDefault || currentDefault === sqlStringLiteral(newDefault)) {
+      // Already on the new default — nothing to do.
+    } else if (botTable.sql.includes(oldDefault)) {
       const temporaryTable = "BotAccount__first_private_message_migration";
       const createSql = botTable.sql
         .replace(/^CREATE TABLE\s+"?BotAccount"?/i, `CREATE TABLE ${quoteIdentifier(temporaryTable)}`)
@@ -131,7 +171,7 @@ function applyFirstPrivateMessageSqliteMigration(
       for (const schemaObject of schemaObjects) {
         db.exec(schemaObject.sql);
       }
-    } else if (!botTable.sql.includes(newDefault)) {
+    } else {
       throw new Error("BotAccount userMessageReply has an unrecognized default; refusing unsafe schema rewrite");
     }
 
@@ -307,6 +347,104 @@ function applyBotHealthInboxSqliteMigration(
   logger.info({ migration: BOT_HEALTH_INBOX_MIGRATION_NAME }, "sqlite incremental migration applied");
 }
 
+function applyLastPublishStartedAtSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const botTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'BotAccount'`)
+    .get() as { present: number } | null;
+  if (!botTable) return;
+
+  if (doneNames.has(LAST_PUBLISH_STARTED_AT_MIGRATION_NAME)) {
+    skipped.push(LAST_PUBLISH_STARTED_AT_MIGRATION_NAME);
+    return;
+  }
+
+  const publishStartedColumn = db
+    .query(`SELECT 1 AS present FROM pragma_table_info('BotAccount') WHERE name = 'lastPublishStartedAt'`)
+    .get() as { present: number } | null;
+  const hasColumn = publishStartedColumn !== null;
+
+  logger.info({ migration: LAST_PUBLISH_STARTED_AT_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    if (!hasColumn) {
+      db.exec(`ALTER TABLE "BotAccount" ADD COLUMN "lastPublishStartedAt" DATETIME`);
+    }
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [
+        randomUUID(),
+        checksumOf(`ALTER TABLE "BotAccount" ADD COLUMN "lastPublishStartedAt" DATETIME`),
+        LAST_PUBLISH_STARTED_AT_MIGRATION_NAME,
+      ],
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  doneNames.add(LAST_PUBLISH_STARTED_AT_MIGRATION_NAME);
+  applied.push(LAST_PUBLISH_STARTED_AT_MIGRATION_NAME);
+  logger.info({ migration: LAST_PUBLISH_STARTED_AT_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
+function applyReviewQueueReminderAtAllSqliteMigration(
+  db: Database,
+  doneNames: Set<string>,
+  applied: string[],
+  skipped: string[],
+  logger: SqliteMigrateLogger,
+): void {
+  const botTable = db
+    .query(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'BotAccount'`)
+    .get() as { present: number } | null;
+  if (!botTable) return;
+
+  if (doneNames.has(REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME)) {
+    skipped.push(REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME);
+    return;
+  }
+
+  const reminderAtAllColumn = db
+    .query(`SELECT 1 AS present FROM pragma_table_info('BotAccount') WHERE name = 'reviewQueueReminderAtAll'`)
+    .get() as { present: number } | null;
+  const hasColumn = reminderAtAllColumn !== null;
+
+  logger.info({ migration: REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME }, "applying sqlite incremental migration");
+  db.exec("BEGIN");
+  try {
+    if (!hasColumn) {
+      db.exec(`ALTER TABLE "BotAccount" ADD COLUMN "reviewQueueReminderAtAll" BOOLEAN NOT NULL DEFAULT false`);
+    }
+    db.run(
+      `INSERT INTO "_prisma_migrations"
+         ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+      [
+        randomUUID(),
+        checksumOf(`ALTER TABLE "BotAccount" ADD COLUMN "reviewQueueReminderAtAll" BOOLEAN NOT NULL DEFAULT false`),
+        REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME,
+      ],
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  doneNames.add(REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME);
+  applied.push(REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME);
+  logger.info({ migration: REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME }, "sqlite incremental migration applied");
+}
+
 /**
  * 应用 SQLite baseline 建库脚本及后续增量迁移（幂等）。
  *
@@ -326,6 +464,7 @@ export function applySqliteBaseline(
   const db = new Database(filePath);
   const applied: string[] = [];
   const skipped: string[] = [];
+  const doneNames = new Set<string>();
   try {
     db.exec("PRAGMA foreign_keys=ON;");
     // SQLite 默认 journal；WAL 对单文件服务的并发读更友好。
@@ -335,7 +474,9 @@ export function applySqliteBaseline(
     const done = db
       .query(`SELECT migration_name FROM "_prisma_migrations" WHERE rolled_back_at IS NULL`)
       .all() as Array<{ migration_name: string }>;
-    const doneNames = new Set(done.map((r) => r.migration_name));
+    for (const row of done) {
+      doneNames.add(row.migration_name);
+    }
 
     if (doneNames.has(SQLITE_BASELINE_NAME)) {
       skipped.push(SQLITE_BASELINE_NAME);
@@ -364,12 +505,29 @@ export function applySqliteBaseline(
 
       doneNames.add(SQLITE_BASELINE_NAME);
       applied.push(SQLITE_BASELINE_NAME);
+      // When the baseline was just applied fresh, the incremental migrations
+      // are already embedded in the baseline schema. Record them as done so
+      // they are skipped below.
+      for (const name of [FIRST_PRIVATE_MESSAGE_MIGRATION_NAME, PUBLISH_IMMEDIATELY_MIGRATION_NAME, BOT_HEALTH_INBOX_MIGRATION_NAME, LAST_PUBLISH_STARTED_AT_MIGRATION_NAME, REVIEW_QUEUE_REMINDER_AT_ALL_MIGRATION_NAME]) {
+        if (!doneNames.has(name) && isBaselineEmbeddedMigration(db, name)) {
+          doneNames.add(name);
+          skipped.push(name);
+          db.run(
+            `INSERT INTO "_prisma_migrations"
+               ("id","checksum","migration_name","started_at","finished_at","applied_steps_count")
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)`,
+            [randomUUID(), checksumOf(`baseline-includes-${name}`), name],
+          );
+        }
+      }
       logger.info({ applied }, "sqlite baseline applied");
     }
 
     applyFirstPrivateMessageSqliteMigration(db, doneNames, applied, skipped, logger);
     applyPublishImmediatelySqliteMigration(db, doneNames, applied, skipped, logger);
     applyBotHealthInboxSqliteMigration(db, doneNames, applied, skipped, logger);
+    applyLastPublishStartedAtSqliteMigration(db, doneNames, applied, skipped, logger);
+    applyReviewQueueReminderAtAllSqliteMigration(db, doneNames, applied, skipped, logger);
     return { applied, skipped };
   } finally {
     db.close();

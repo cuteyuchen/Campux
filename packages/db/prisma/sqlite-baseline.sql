@@ -235,6 +235,7 @@ CREATE TABLE "BotAccount" (
     "reviewNotificationEnabled" BOOLEAN NOT NULL DEFAULT false,
     "reviewQueueAutoReminderEnabled" BOOLEAN NOT NULL DEFAULT false,
     "reviewQueueReminderThresholdHours" INTEGER NOT NULL DEFAULT 6,
+    "reviewQueueReminderAtAll" BOOLEAN NOT NULL DEFAULT false,
     "autoFriendRequestApprovalEnabled" BOOLEAN NOT NULL DEFAULT false,
     "connectionToken" TEXT NOT NULL,
     "publishTextTemplate" JSONB NOT NULL DEFAULT '{"includePostId":true,"includeAuthorMention":false,"includeLinks":false,"customText":""}',
@@ -251,6 +252,7 @@ CREATE TABLE "BotAccount" (
     "privateMessagesReceived" INTEGER NOT NULL DEFAULT 0,
     "adminRepliesSent" INTEGER NOT NULL DEFAULT 0,
     "lastSeenAt" DATETIME,
+    "lastPublishStartedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "BotAccount_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );

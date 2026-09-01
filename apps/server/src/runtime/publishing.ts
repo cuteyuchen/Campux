@@ -2,9 +2,14 @@ import type { FastifyBaseLogger } from "fastify";
 import type { CampuxConfig } from "@campux/config";
 import { Prisma, JsonNull, supportsAdvisoryLock } from "@campux/db";
 import type { PostStatus } from "@campux/db";
-import { getStorageDriver, publishToQZone, QZonePublishError } from "@campux/integrations";
+import {
+  getStorageDriver,
+  isAmbiguousQZonePublishTimeout,
+  publishToQZone,
+  QZonePublishError,
+} from "@campux/integrations";
 import { renderPostCard } from "@campux/render";
-import { qzoneCookieDomain } from "../lib/bot-workflows";
+import { BotWorkflowError, qzoneCookieDomain } from "../lib/bot-workflows";
 import { serializeAssignedPostTags } from "../lib/post-tags";
 import { prisma } from "../lib/prisma";
 import { decryptJson } from "../lib/secret-json";
@@ -15,14 +20,66 @@ import { generatePublishSummary } from "./publish-summary";
 import { readTenantPublishLlmSummaryEnabled } from "../lib/tenant-metadata";
 import { imageStorageHardMaxBytes } from "../lib/image-upload-policy";
 import { readSvgAvatarDataUrl } from "../lib/svg-avatars";
-import { createOfficialQqForumThread } from "./official-qq";
+import { createOfficialQqForumThread, OfficialQqPublishOutcomeUnknownError } from "./official-qq";
 import { buildPublicForumMediaUrl } from "../lib/public-forum-media";
 import type { RuntimeJob, RuntimeQueue } from "./queue";
+import { isTenantRuntimeActiveStatus, tenantRuntimeRelationFilter } from "../lib/tenant-runtime";
+import { runWithActiveTenantLease } from "../lib/tenant-runtime-lease";
 
 const maxPublishAttempts = 3;
 export const defaultPublishIntervalSeconds = 10;
 export const republishFailureRetryDelayMs = 12 * 60 * 60 * 1000;
 export const republishFailureSweepIntervalMs = 15 * 60 * 1000;
+export const orphanPublishingPostRecoveryAgeMs = 10 * 60 * 1000;
+export const interruptedPublishAttemptMessage = "发布进程中断，远端结果不确定；为避免重复发布，系统未自动重试";
+const ambiguousPublishNoRetryMarker = "远端可能已接收，为避免重复发布未自动重试";
+const batchFanoutAuditPrefix = "批量发布：已生成 ";
+const incompleteBatchFanoutAuditComment = "历史批量发布任务落库不完整，系统已安全终止剩余任务；请人工核对后再决定是否重发";
+const incompleteBatchFanoutAttemptMessage = `历史批量发布任务落库不完整；${ambiguousPublishNoRetryMarker}`;
+
+export function readExpectedBatchFanoutCount(comments: string[]) {
+  let expectedCount: number | null = null;
+  for (const comment of comments) {
+    const matched = comment.match(/批量发布：已生成\s+(\d+)\s+个发布任务/);
+    if (!matched?.[1]) {
+      continue;
+    }
+    const parsed = Number.parseInt(matched[1], 10);
+    if (Number.isSafeInteger(parsed) && parsed >= 0) {
+      expectedCount = Math.max(expectedCount ?? 0, parsed);
+    }
+  }
+  return expectedCount;
+}
+
+export function isIncompleteBatchFanout(input: {
+  ownerStatus: string;
+  flushedAt: Date | null;
+  expectedCount: number | null;
+  actualCount: number;
+  hasIncompleteRecoveryAudit?: boolean;
+}) {
+  const eligibleOwner = input.ownerStatus === "publishing"
+    || (input.hasIncompleteRecoveryAudit === true
+      && (input.ownerStatus === "partially_failed" || input.ownerStatus === "failed"));
+  return eligibleOwner
+    && input.flushedAt !== null
+    && input.expectedCount !== null
+    && input.actualCount < input.expectedCount;
+}
+
+export function shouldAutomaticallyRequeueFailedAttempt(lastError: string | null) {
+  return lastError !== interruptedPublishAttemptMessage
+    && !lastError?.includes(ambiguousPublishNoRetryMarker);
+}
+
+export function interruptedPublishAttemptRecoveryData() {
+  return {
+    status: "failed" as const,
+    lastError: interruptedPublishAttemptMessage,
+    nextRunAt: null,
+  };
+}
 
 const duplicateBlockingPublishAttemptStatuses = new Set(["queued", "running", "succeeded"]);
 
@@ -72,6 +129,111 @@ type ImagePayload = {
   fileName?: string;
 };
 
+function containsEncodedPublishCredential(value: string) {
+  const credentialAssignment = /["']?\b(?:p_skey|skey|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|password|passwd|authorization|cookie)\b["']?\s*[:=]/i;
+  let decoded = value.replace(/\+/g, "%20");
+  for (let depth = 0; depth < 2; depth += 1) {
+    const unescaped = decoded.replace(/\\+(?=["'])/g, "");
+    if (unescaped !== value && credentialAssignment.test(unescaped)) {
+      return true;
+    }
+    let changed = false;
+    const next = decoded.replace(/(?:%[0-9a-f]{2})+/gi, (segment) => {
+      try {
+        const replacement = decodeURIComponent(segment);
+        changed ||= replacement !== segment;
+        return replacement;
+      } catch {
+        return segment;
+      }
+    });
+    if (changed && credentialAssignment.test(next)) {
+      return true;
+    }
+    if (!changed) {
+      break;
+    }
+    decoded = next;
+  }
+  return false;
+}
+
+function redactPublishDiagnostic(value: string, maxLength = 2_000) {
+  if (containsEncodedPublishCredential(value)) {
+    return "[REDACTED encoded credential diagnostic]";
+  }
+  return value
+    .replace(/(["']?\b(?:cookie|set-cookie)\b["']?\s*[:=]\s*["']?)[^\r\n"']+/gi, "$1[REDACTED]")
+    .replace(/(["']?\b(?:p_skey|skey|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|password|passwd|token|authorization)\b["']?\s*[:=]\s*["']?)(?:(?:Bearer|Basic)\s+)?[^"'\s,;}&]+/gi, "$1[REDACTED]")
+    .replace(/([?&](?:g_tk|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|token|authorization)=)[^&\s]+/gi, "$1[REDACTED]")
+    .slice(0, maxLength);
+}
+
+function stringifyPublishDiagnostic(value: unknown) {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? String(value) : serialized;
+  } catch {
+    return String(value);
+  }
+}
+
+export function serializePublishErrorForLog(error: unknown) {
+  const errorName = error instanceof Error ? error.name || "Error" : "UnknownError";
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "发布失败");
+  const rawCause = error && typeof error === "object" && "cause" in error
+    ? (error as { cause?: unknown }).cause
+    : undefined;
+  const causeText = rawCause instanceof Error
+    ? [rawCause.name, rawCause.message, rawCause.stack].filter(Boolean).join("\n")
+    : rawCause === undefined
+      ? null
+      : stringifyPublishDiagnostic(rawCause);
+  return {
+    errorName: redactPublishDiagnostic(errorName, 200),
+    errorMessage: redactPublishDiagnostic(rawMessage),
+    errorStack: error instanceof Error && error.stack
+      ? redactPublishDiagnostic(error.stack, 8_000)
+      : null,
+    errorCause: causeText ? redactPublishDiagnostic(causeText, 4_000) : null,
+  };
+}
+
+function summarizeQZonePlatformResponseForLog(error: QZonePublishError | null) {
+  const exchanges = error?.verbose.http ?? [];
+  let exchange: typeof exchanges[number] | undefined;
+  for (let index = exchanges.length - 1; index >= 0; index -= 1) {
+    const candidate = exchanges[index];
+    if (candidate?.response || candidate?.error) {
+      exchange = candidate;
+      break;
+    }
+  }
+  if (!exchange) {
+    return null;
+  }
+  return {
+    label: redactPublishDiagnostic(exchange.label, 300),
+    durationMs: exchange.durationMs ?? null,
+    status: exchange.response?.status ?? null,
+    statusText: exchange.response ? redactPublishDiagnostic(exchange.response.statusText, 300) : null,
+    responseBody: exchange.response?.body
+      ? redactPublishDiagnostic(exchange.response.body, 2_000)
+      : null,
+    error: exchange.error ? redactPublishDiagnostic(exchange.error) : null,
+  };
+}
+
+export function isRecoverableOrphanPublishingPost(input: {
+  updatedAt: Date;
+  publishAttemptCount: number;
+  batchItemId: string | null;
+}, now = Date.now()) {
+  return input.publishAttemptCount === 0
+    && input.batchItemId === null
+    && now - input.updatedAt.getTime() >= orphanPublishingPostRecoveryAgeMs;
+}
+
 function hasActiveOrSucceededAttempts(attempts: Array<{ status: string }>) {
   return attempts.some((attempt) => duplicateBlockingPublishAttemptStatuses.has(attempt.status));
 }
@@ -85,6 +247,15 @@ function shouldSkipPublishFanout(options: {
   }
 
   return hasActiveOrSucceededAttempts(options.attempts);
+}
+
+export function shouldSkipBatchPublishFanout(options: {
+  ownerStatus: string;
+  flushedAt: Date | null;
+  attempts: Array<{ status: string }>;
+}) {
+  return options.ownerStatus === "published"
+    || (options.flushedAt !== null && hasActiveOrSucceededAttempts(options.attempts));
 }
 
 async function markPublishAttemptSkipped(attemptId: string, attempt: { postId: string; batchId: string | null }, reason: string) {
@@ -106,16 +277,195 @@ export function registerPublishingWorker(queue: RuntimeQueue, logger: FastifyBas
   });
 }
 
-export async function recoverPublishAttempts(queue: RuntimeQueue, logger: FastifyBaseLogger) {
-  await prisma.publishAttempt.updateMany({
+async function reconcileIncompleteLegacyBatchFanouts(logger: FastifyBaseLogger) {
+  const candidates = await prisma.publishBatch.findMany({
     where: {
-      status: "running",
+      status: "publishing",
+      flushedAt: { not: null },
+      tenant: tenantRuntimeRelationFilter,
     },
-    data: {
-      status: "queued",
-      nextRunAt: new Date(),
+    select: {
+      id: true,
+      tenantId: true,
+      status: true,
+      flushedAt: true,
+      attempts: { select: { id: true, status: true, lastError: true } },
+      items: {
+        select: {
+          post: {
+            select: {
+              id: true,
+              status: true,
+              tenantId: true,
+              logs: {
+                where: {
+                  OR: [
+                    { comment: { startsWith: batchFanoutAuditPrefix } },
+                    { comment: incompleteBatchFanoutAuditComment },
+                  ],
+                },
+                select: { comment: true },
+              },
+            },
+          },
+        },
+      },
     },
   });
+
+  let reconciledCount = 0;
+  for (const candidate of candidates) {
+    const comments = candidate.items.flatMap((item) => item.post.logs.map((log) => log.comment));
+    const expectedCount = readExpectedBatchFanoutCount(comments);
+    if (!isIncompleteBatchFanout({
+      ownerStatus: candidate.status,
+      flushedAt: candidate.flushedAt,
+      expectedCount,
+      actualCount: candidate.attempts.length,
+    })) {
+      continue;
+    }
+
+    const reconciled = await prisma.$transaction(async (transaction) => {
+      await lockPublishFanout(transaction, candidate.tenantId, `batch:${candidate.id}`);
+      const batch = await transaction.publishBatch.findUnique({
+        where: { id: candidate.id },
+        select: {
+          id: true,
+          tenantId: true,
+          status: true,
+          flushedAt: true,
+          attempts: { select: { id: true, status: true, lastError: true } },
+          items: {
+            select: {
+              post: {
+                select: {
+                  id: true,
+                  status: true,
+                  tenantId: true,
+                  logs: {
+                    where: {
+                      OR: [
+                        { comment: { startsWith: batchFanoutAuditPrefix } },
+                        { comment: incompleteBatchFanoutAuditComment },
+                      ],
+                    },
+                    select: { comment: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      if (!batch) {
+        return false;
+      }
+
+      const freshComments = batch.items.flatMap((item) => item.post.logs.map((log) => log.comment));
+      const freshExpectedCount = readExpectedBatchFanoutCount(freshComments);
+      if (!isIncompleteBatchFanout({
+        ownerStatus: batch.status,
+        flushedAt: batch.flushedAt,
+        expectedCount: freshExpectedCount,
+        actualCount: batch.attempts.length,
+      })) {
+        return false;
+      }
+
+      for (const attempt of batch.attempts) {
+        if (attempt.status === "succeeded" || attempt.status === "skipped") {
+          continue;
+        }
+        const lastError = attempt.lastError?.includes(incompleteBatchFanoutAttemptMessage)
+          ? attempt.lastError
+          : [attempt.lastError, incompleteBatchFanoutAttemptMessage].filter(Boolean).join("\n");
+        await transaction.publishAttempt.update({
+          where: { id: attempt.id },
+          data: { status: "failed", nextRunAt: null, lastError },
+        });
+      }
+
+      const nextStatus = batch.attempts.some((attempt) => attempt.status === "succeeded")
+        ? "partially_failed" as const
+        : "failed" as const;
+      if (batch.status !== nextStatus) {
+        await transaction.publishBatch.update({
+          where: { id: batch.id },
+          data: { status: nextStatus },
+        });
+      }
+
+      for (const item of batch.items) {
+        const alreadyAudited = item.post.logs.some((log) => log.comment === incompleteBatchFanoutAuditComment);
+        if (item.post.status === nextStatus && alreadyAudited) {
+          continue;
+        }
+        await transaction.post.update({
+          where: { id: item.post.id },
+          data: {
+            status: nextStatus,
+            ...(alreadyAudited ? {} : {
+              logs: {
+                create: {
+                  tenantId: item.post.tenantId,
+                  oldStatus: item.post.status,
+                  newStatus: nextStatus,
+                  comment: incompleteBatchFanoutAuditComment,
+                },
+              },
+            }),
+          },
+        });
+      }
+      return true;
+    }, {
+      maxWait: 5_000,
+      timeout: 30_000,
+    });
+
+    if (reconciled) {
+      reconciledCount += 1;
+      logger.warn(
+        {
+          batchId: candidate.id,
+          tenantId: candidate.tenantId,
+          expectedCount,
+          actualCount: candidate.attempts.length,
+        },
+        "incomplete legacy batch fanout safely reconciled",
+      );
+    }
+  }
+  return reconciledCount;
+}
+
+export async function recoverPublishAttempts(queue: RuntimeQueue, logger: FastifyBaseLogger) {
+  const incompleteLegacyBatchesRecovered = await reconcileIncompleteLegacyBatchFanouts(logger);
+  const interruptedAttempts = await prisma.publishAttempt.findMany({
+    where: {
+      OR: [
+        { status: "running" },
+        { status: "failed", lastError: interruptedPublishAttemptMessage, nextRunAt: null },
+      ],
+      post: { tenant: tenantRuntimeRelationFilter },
+    },
+    select: { id: true, status: true, postId: true, batchId: true },
+  });
+  let interruptedAttemptsRecovered = 0;
+  for (const attempt of interruptedAttempts) {
+    if (attempt.status === "running") {
+      const updated = await prisma.publishAttempt.updateMany({
+        where: { id: attempt.id, status: "running" },
+        data: interruptedPublishAttemptRecoveryData(),
+      });
+      if (updated.count === 0) {
+        continue;
+      }
+      interruptedAttemptsRecovered += 1;
+    }
+    await refreshAttemptPostStatuses(attempt);
+  }
 
   const attempts = await prisma.publishAttempt.findMany({
     where: {
@@ -134,6 +484,7 @@ export async function recoverPublishAttempts(queue: RuntimeQueue, logger: Fastif
         status: {
           in: ["publishing", "partially_failed", "failed"],
         },
+        tenant: tenantRuntimeRelationFilter,
       },
     },
   });
@@ -142,11 +493,88 @@ export async function recoverPublishAttempts(queue: RuntimeQueue, logger: Fastif
     enqueueAttempt(queue, attempt.tenantId, attempt.id, attempt.nextRunAt ?? new Date());
   }
 
+  const orphanRecoveryNow = Date.now();
+  const orphanRecoveryCutoff = new Date(orphanRecoveryNow - orphanPublishingPostRecoveryAgeMs);
+  const orphanCandidates = await prisma.post.findMany({
+    where: {
+      status: "publishing",
+      updatedAt: {
+        lte: orphanRecoveryCutoff,
+      },
+      publishAttempts: {
+        none: {},
+      },
+      batchItem: {
+        is: null,
+      },
+      tenant: tenantRuntimeRelationFilter,
+    },
+    select: {
+      id: true,
+      tenantId: true,
+      updatedAt: true,
+      _count: {
+        select: {
+          publishAttempts: true,
+        },
+      },
+      batchItem: {
+        select: {
+          id: true,
+        },
+      },
+    },
+  });
+
+  let orphanPostsRecovered = 0;
+  for (const post of orphanCandidates) {
+    if (!isRecoverableOrphanPublishingPost({
+      updatedAt: post.updatedAt,
+      publishAttemptCount: post._count.publishAttempts,
+      batchItemId: post.batchItem?.id ?? null,
+    }, orphanRecoveryNow)) {
+      continue;
+    }
+    const recovered = await prisma.$transaction(async (transaction) => {
+      const updated = await transaction.post.updateMany({
+        where: {
+          id: post.id,
+          status: "publishing",
+          updatedAt: {
+            equals: post.updatedAt,
+            lte: orphanRecoveryCutoff,
+          },
+          publishAttempts: { none: {} },
+          batchItem: { is: null },
+        },
+        data: { status: "failed" },
+      });
+      if (updated.count === 0) {
+        return false;
+      }
+      await transaction.postLog.create({
+        data: {
+          tenantId: post.tenantId,
+          postId: post.id,
+          oldStatus: "publishing",
+          newStatus: "failed",
+          comment: "发布流程异常中断且不存在可恢复的发布任务，系统已收敛为失败状态",
+        },
+      });
+      return true;
+    });
+    if (!recovered) {
+      continue;
+    }
+    orphanPostsRecovered += 1;
+  }
+
   const posts = await prisma.post.findMany({
     where: {
       status: {
         in: ["publishing", "partially_failed", "failed"],
       },
+      tenant: tenantRuntimeRelationFilter,
     },
     select: {
       id: true,
@@ -157,11 +585,34 @@ export async function recoverPublishAttempts(queue: RuntimeQueue, logger: Fastif
     await refreshAggregatePostStatus(post.id);
   }
 
-  logger.info({ count: attempts.length, postsChecked: posts.length }, "publish attempts recovered");
+  const batches = await prisma.publishBatch.findMany({
+    where: {
+      status: {
+        in: ["publishing", "partially_failed", "failed"],
+      },
+      tenant: tenantRuntimeRelationFilter,
+    },
+    select: { id: true },
+  });
+  for (const batch of batches) {
+    await refreshBatchPostStatuses(batch.id);
+  }
+
+  logger.info(
+    {
+      count: attempts.length,
+      interruptedAttemptsRecovered,
+      incompleteLegacyBatchesRecovered,
+      postsChecked: posts.length,
+      batchesChecked: batches.length,
+      orphanPostsRecovered,
+    },
+    "publish attempts recovered",
+  );
 }
 
 export async function requeueExpiredFailedPublishAttempts(queue: RuntimeQueue, logger: FastifyBaseLogger, now = new Date()) {
-  const attempts = await prisma.publishAttempt.findMany({
+  const candidates = await prisma.publishAttempt.findMany({
     where: {
       status: "failed",
       nextRunAt: null,
@@ -172,6 +623,7 @@ export async function requeueExpiredFailedPublishAttempts(queue: RuntimeQueue, l
         status: {
           in: ["partially_failed", "failed"],
         },
+        tenant: tenantRuntimeRelationFilter,
       },
       publishTarget: {
         enabled: true,
@@ -187,6 +639,7 @@ export async function requeueExpiredFailedPublishAttempts(queue: RuntimeQueue, l
       updatedAt: "asc",
     },
   });
+  const attempts = candidates.filter((attempt) => shouldAutomaticallyRequeueFailedAttempt(attempt.lastError));
 
   for (const attempt of attempts) {
     const { attempt: updated, nextRunAt } = await schedulePublishAttempt({
@@ -247,6 +700,63 @@ export function publishTargetIntervalSeconds(target: { publishDelaySeconds: numb
   return target.publishDelaySeconds ?? null;
 }
 
+interface ScheduleAndEnqueueFanoutOptions {
+  queue: RuntimeQueue;
+  tenantId: string;
+  postId: string;
+  batchId?: string | null;
+  targets: Array<{ id: string; botAccountId: string; publishDelaySeconds: number | null }>;
+  resetAttempt?: boolean;
+}
+
+/**
+ * Shared helper: schedule publish attempts for each target and enqueue them.
+ * Used by both enqueuePublishFanout and requeuePublishFanout to keep behavior aligned.
+ *
+ * All scheduling happens in a single transaction so that either all targets succeed
+ * or none do, preventing orphaned PublishAttempt records without queue jobs.
+ *
+ * Enqueueing uses enqueueUnique with a stable dedupe key (postId:publishTargetId or
+ * batchId:publishTargetId) to ensure each attempt produces at most one publishPost job.
+ */
+async function scheduleAndEnqueueFanoutAttempts(options: ScheduleAndEnqueueFanoutOptions) {
+  const { queue, tenantId, postId, batchId, targets, resetAttempt } = options;
+
+  const scheduledAttempts = await prisma.$transaction(async (tx) => {
+    const results = [];
+    for (const target of targets) {
+      const scheduleOptions: SchedulePublishAttemptOptions = {
+        tenantId,
+        postId,
+        publishTargetId: target.id,
+        botAccountId: target.botAccountId,
+        intervalSeconds: publishTargetIntervalSeconds(target),
+        resetAttempt: resetAttempt ?? false,
+      };
+      if (batchId !== undefined) {
+        scheduleOptions.batchId = batchId;
+      }
+      const scheduled = await schedulePublishAttemptInTransaction(tx, scheduleOptions);
+      results.push({ scheduled, targetId: target.id });
+    }
+    return results;
+  }, {
+    maxWait: 5_000,
+    timeout: 30_000,
+  });
+
+  // Enqueue all attempts after successful transaction commit using unique keys
+  // to prevent duplicate jobs for the same (postId, publishTargetId) or (batchId, publishTargetId)
+  for (const { scheduled, targetId } of scheduledAttempts) {
+    const dedupeKey = batchId
+      ? `publish:${batchId}:${targetId}`
+      : `publish:${postId}:${targetId}`;
+    enqueueAttemptUnique(queue, tenantId, scheduled.attempt.id, dedupeKey, scheduled.nextRunAt);
+  }
+
+  return scheduledAttempts.map(({ scheduled }) => scheduled.attempt);
+}
+
 export async function enqueuePublishFanout(queue: RuntimeQueue, tenantId: string, postId: string, actorId?: string | null) {
   const post = await prisma.post.findUnique({
     where: {
@@ -293,26 +803,122 @@ export async function enqueuePublishFanout(queue: RuntimeQueue, tenantId: string
     },
   });
 
-  if (targets.length === 0) {
-    await prisma.post.update({
-      where: {
-        id: postId,
+  const attempts = await prisma.$transaction(async (tx) => {
+    await lockPublishFanout(tx, tenantId, `post:${postId}`);
+    const currentPost = await tx.post.findUnique({
+      where: { id: postId },
+      select: {
+        status: true,
+        publishAttempts: {
+          select: { id: true, status: true },
+        },
       },
+    });
+    if (
+      !currentPost
+      || shouldSkipPublishFanout({
+        ownerStatus: currentPost.status,
+        attempts: currentPost.publishAttempts,
+      })
+    ) {
+      return [];
+    }
+
+    if (targets.length === 0) {
+      await tx.post.update({
+        where: { id: postId },
+        data: {
+          status: "published",
+          logs: {
+            create: {
+              tenantId,
+              actorId: actorId ?? null,
+              oldStatus: currentPost.status,
+              newStatus: "published",
+              comment: "没有启用发布目标，自动完成发布",
+            },
+          },
+        },
+      });
+      return [];
+    }
+
+    await tx.post.update({
+      where: { id: postId },
       data: {
-        status: "published",
+        status: "publishing",
         logs: {
           create: {
             tenantId,
             actorId: actorId ?? null,
-            oldStatus: "approved",
-            newStatus: "published",
-            comment: "没有启用发布目标，自动完成发布",
+            oldStatus: currentPost.status,
+            newStatus: "publishing",
+            comment: `已生成 ${targets.length} 个发布任务`,
           },
         },
       },
     });
+    return targets;
+  }, {
+    maxWait: 5_000,
+    timeout: 30_000,
+  });
+  // Use the transaction's returned result as the sole gate: it returns [] when
+  // fanout is skipped or no targets exist, and the targets array otherwise.
+  if (!targets || targets.length === 0) {
     return [];
   }
+  return scheduleAndEnqueueFanoutAttempts({
+    queue,
+    tenantId,
+    postId,
+    targets,
+    resetAttempt: false,
+  });
+}
+
+export async function requeuePublishFanout(queue: RuntimeQueue, tenantId: string, postId: string, actorId?: string | null) {
+  const post = await prisma.post.findFirst({
+    where: {
+      id: postId,
+      tenantId,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!post) {
+    return [];
+  }
+
+  const targets = await prisma.publishTarget.findMany({
+    where: {
+      tenantId,
+      enabled: true,
+      botAccount: {
+        enabled: true,
+      },
+    },
+    include: {
+      botAccount: true,
+    },
+    orderBy: {
+      displayName: "asc",
+    },
+  });
+
+  if (targets.length === 0) {
+    return [];
+  }
+
+  // Serialize concurrent requeue scheduling for the same post
+  await prisma.$transaction(async (tx) => {
+    await lockPublishFanout(tx, tenantId, `requeue:${postId}`);
+  }, {
+    maxWait: 5_000,
+    timeout: 30_000,
+  });
 
   await prisma.post.update({
     where: {
@@ -324,31 +930,20 @@ export async function enqueuePublishFanout(queue: RuntimeQueue, tenantId: string
         create: {
           tenantId,
           actorId: actorId ?? null,
-          oldStatus: "approved",
           newStatus: "publishing",
-          comment: `已生成 ${targets.length} 个发布任务`,
+          comment: `手动重发，已重置 ${targets.length} 个发布任务并重新排队`,
         },
       },
     },
   });
 
-  const attempts = [];
-  for (const target of targets) {
-    const { attempt, nextRunAt } = await schedulePublishAttempt({
-      tenantId,
-      postId,
-      publishTargetId: target.id,
-      botAccountId: target.botAccountId,
-      intervalSeconds: publishTargetIntervalSeconds(target),
-    });
-    attempts.push({ attempt, nextRunAt });
-  }
-  // 先持久化全部目标，再开始消费，避免需要附带 QZone 链接的 QQ 频道任务在 QZone attempt 尚未创建时抢跑。
-  for (const scheduled of attempts) {
-    enqueueAttempt(queue, tenantId, scheduled.attempt.id, scheduled.nextRunAt);
-  }
-
-  return attempts.map(({ attempt }) => attempt);
+  return scheduleAndEnqueueFanoutAttempts({
+    queue,
+    tenantId,
+    postId,
+    targets,
+    resetAttempt: true,
+  });
 }
 
 /**
@@ -377,8 +972,9 @@ export async function enqueueBatchPublishFanout(queue: RuntimeQueue, tenantId: s
   }
 
   if (
-    shouldSkipPublishFanout({
+    shouldSkipBatchPublishFanout({
       ownerStatus: batch.status,
+      flushedAt: batch.flushedAt,
       attempts: batch.attempts,
     })
   ) {
@@ -408,66 +1004,106 @@ export async function enqueueBatchPublishFanout(queue: RuntimeQueue, tenantId: s
     },
   });
 
-  // 标记批次进入发布阶段。
-  await prisma.publishBatch.update({
-    where: { id: batch.id },
-    data: { status: targets.length === 0 ? "published" : "publishing", flushedAt: new Date() },
-  });
+  const attempts = await prisma.$transaction(async (tx) => {
+    await lockPublishFanout(tx, tenantId, `batch:${batch.id}`);
+    const currentBatch = await tx.publishBatch.findUnique({
+      where: { id: batch.id },
+      select: {
+        status: true,
+        flushedAt: true,
+        attempts: {
+          select: { id: true, status: true },
+        },
+      },
+    });
+    if (
+      !currentBatch
+      || shouldSkipBatchPublishFanout({
+        ownerStatus: currentBatch.status,
+        flushedAt: currentBatch.flushedAt,
+        attempts: currentBatch.attempts,
+      })
+    ) {
+      return [];
+    }
 
-  if (targets.length === 0) {
+    await tx.publishBatch.update({
+      where: { id: batch.id },
+      data: { status: "publishing" },
+    });
+
+    if (targets.length === 0) {
+      for (const postId of postIds) {
+        await tx.post.update({
+          where: { id: postId },
+          data: {
+            status: "published",
+            logs: {
+              create: {
+                tenantId,
+                actorId: actorId ?? null,
+                oldStatus: "publishing",
+                newStatus: "published",
+                comment: "没有启用发布目标，批量稿件自动完成发布",
+              },
+            },
+          },
+        });
+      }
+      await tx.publishBatch.update({
+        where: { id: batch.id },
+        data: { status: "published", flushedAt: new Date() },
+      });
+      return [];
+    }
+
     for (const postId of postIds) {
-      await prisma.post.update({
+      await tx.post.update({
         where: { id: postId },
         data: {
-          status: "published",
+          status: "publishing",
           logs: {
             create: {
               tenantId,
               actorId: actorId ?? null,
               oldStatus: "publishing",
-              newStatus: "published",
-              comment: "没有启用发布目标，批量稿件自动完成发布",
+              newStatus: "publishing",
+              comment: `批量发布：已生成 ${targets.length} 个发布任务（与其他 ${postIds.length - 1} 条稿件合并为一条说说）`,
             },
           },
         },
       });
     }
+
+    const scheduledAttempts = [];
+    for (const target of targets) {
+      const scheduled = await schedulePublishAttemptInTransaction(tx, {
+        tenantId,
+        postId: anchorPostId,
+        publishTargetId: target.id,
+        botAccountId: target.botAccountId,
+        batchId: batch.id,
+        intervalSeconds: publishTargetIntervalSeconds(target),
+      });
+      scheduledAttempts.push(scheduled);
+    }
+    await tx.publishBatch.update({
+      where: { id: batch.id },
+      data: { flushedAt: new Date() },
+    });
+    return scheduledAttempts;
+  }, {
+    maxWait: 5_000,
+    timeout: 30_000,
+  });
+  if (attempts.length === 0) {
     return [];
   }
-
-  for (const postId of postIds) {
-    await prisma.post.update({
-      where: { id: postId },
-      data: {
-        status: "publishing",
-        logs: {
-          create: {
-            tenantId,
-            actorId: actorId ?? null,
-            oldStatus: "publishing",
-            newStatus: "publishing",
-            comment: `批量发布：已生成 ${targets.length} 个发布任务（与其他 ${postIds.length - 1} 条稿件合并为一条说说）`,
-          },
-        },
-      },
-    });
-  }
-
-  const attempts = [];
-  for (const target of targets) {
-    const { attempt, nextRunAt } = await schedulePublishAttempt({
-      tenantId,
-      postId: anchorPostId,
-      publishTargetId: target.id,
-      botAccountId: target.botAccountId,
-      batchId: batch.id,
-      intervalSeconds: publishTargetIntervalSeconds(target),
-    });
-    attempts.push({ attempt, nextRunAt });
-  }
-  // 同单稿 fanout：确保批次的所有目标已落库，频道任务才能判断对应 QZone 任务是否仍在进行。
+  // 全部目标 attempt 与 durable marker 同事务提交后才开始消费。
+  // 使用 enqueueUnique ��止同一 (batchId, publishTargetId) 产生重复作业。
   for (const scheduled of attempts) {
-    enqueueAttempt(queue, tenantId, scheduled.attempt.id, scheduled.nextRunAt);
+    const dedupeKey = `publish:${batch.id}:${scheduled.attempt.publishTargetId}`;
+    enqueueAttemptUnique(queue, tenantId, scheduled.attempt.id, dedupeKey, scheduled.nextRunAt);
   }
 
   return attempts.map(({ attempt }) => attempt);
@@ -490,24 +1126,37 @@ async function ensurePostPublishSummary(
   if (cached) {
     return cached;
   }
-  const summary = await generatePublishSummary({ tenantId, text, logger });
-  if (!summary) {
-    return null;
-  }
-  // 仅当仍为空时写入：若另一墙的 attempt 已抢先生成并落库，沿用它那一份以保持各墙一致。
-  await prisma.post
-    .updateMany({ where: { id: postId, publishSummary: null }, data: { publishSummary: summary } })
-    .catch((error) => {
-      logger.warn({ error, postId }, "publish summary: failed to persist generated summary");
-    });
-  const persisted = await prisma.post
-    .findUnique({ where: { id: postId }, select: { publishSummary: true } })
-    .catch(() => null);
-  return persisted?.publishSummary?.trim() || summary;
+  const leased = await runWithActiveTenantLease(prisma, tenantId, async (transaction) => {
+    const summary = await generatePublishSummary({ tenantId, text, logger, transaction });
+    if (!summary) {
+      return null;
+    }
+    // 仅当仍为空时写入：若另一墙的 attempt 已抢先生成并落库，沿用它那一份以保持各墙一致。
+    await transaction.post
+      .updateMany({ where: { id: postId, publishSummary: null }, data: { publishSummary: summary } })
+      .catch((error: unknown) => {
+        logger.warn({ error, postId }, "publish summary: failed to persist generated summary");
+      });
+    const persisted = await transaction.post
+      .findUnique({ where: { id: postId }, select: { publishSummary: true } })
+      .catch(() => null);
+    return persisted?.publishSummary?.trim() || summary;
+  });
+  return leased.active ? leased.value : null;
 }
 
 export function effectivePublishIntervalSeconds(value: number | null | undefined) {
   return Math.max(value ?? defaultPublishIntervalSeconds, 0);
+}
+
+export function resolveEarliestPublishDispatchAt(options: {
+  now: Date;
+  intervalSeconds: number | null | undefined;
+  latestActivityAt?: Date | null;
+}) {
+  const intervalMs = effectivePublishIntervalSeconds(options.intervalSeconds) * 1_000;
+  const latestActivityAtMs = options.latestActivityAt?.getTime() ?? 0;
+  return new Date(Math.max(options.now.getTime(), latestActivityAtMs + intervalMs));
 }
 
 export async function resolveNextPublishRunAt(options: {
@@ -556,7 +1205,7 @@ export async function resolveNextPublishRunAt(options: {
   return new Date(Math.max(now + intervalMs, latestAnchor + intervalMs));
 }
 
-export async function schedulePublishAttempt(options: {
+type SchedulePublishAttemptOptions = {
   tenantId: string;
   postId: string;
   publishTargetId: string;
@@ -565,41 +1214,57 @@ export async function schedulePublishAttempt(options: {
   intervalSeconds?: number | null;
   excludeAttemptId?: string;
   resetAttempt?: boolean;
-}) {
-  return prisma.$transaction(async (tx) => {
-    await lockPublishSchedule(tx, options.tenantId, options.botAccountId);
-    const nextRunAt = await resolveNextPublishRunAt({
+};
+
+async function schedulePublishAttemptInTransaction(
+  tx: Prisma.TransactionClient,
+  options: SchedulePublishAttemptOptions,
+) {
+  await lockPublishSchedule(tx, options.tenantId, options.botAccountId);
+  const nextRunAt = await resolveNextPublishRunAt(
+    {
       tenantId: options.tenantId,
       botAccountId: options.botAccountId,
       ...(options.intervalSeconds === undefined ? {} : { intervalSeconds: options.intervalSeconds }),
       ...(options.excludeAttemptId === undefined ? {} : { excludeAttemptId: options.excludeAttemptId }),
-    }, tx);
-    const whereUnique = options.batchId
-      ? { batchId_publishTargetId: { batchId: options.batchId, publishTargetId: options.publishTargetId } }
-      : { postId_publishTargetId: { postId: options.postId, publishTargetId: options.publishTargetId } };
-    const attempt = await tx.publishAttempt.upsert({
-      where: whereUnique,
-      update: {
-        status: "queued",
-        ...(options.resetAttempt ? { attempt: 0 } : {}),
-        lastError: null,
-        externalId: null,
-        qzoneTid: null,
-        verbose: JsonNull,
-        nextRunAt,
-      },
-      create: {
-        tenantId: options.tenantId,
-        postId: options.postId,
-        publishTargetId: options.publishTargetId,
-        batchId: options.batchId ?? null,
-        status: "queued",
-        nextRunAt,
-      },
-    });
-
-    return { attempt, nextRunAt };
+    },
+    tx,
+  );
+  const whereUnique = options.batchId
+    ? { batchId_publishTargetId: { batchId: options.batchId, publishTargetId: options.publishTargetId } }
+    : { postId_publishTargetId: { postId: options.postId, publishTargetId: options.publishTargetId } };
+  const attempt = await tx.publishAttempt.upsert({
+    where: whereUnique,
+    update: {
+      status: "queued",
+      ...(options.resetAttempt ? { attempt: 0 } : {}),
+      lastError: null,
+      externalId: null,
+      qzoneTid: null,
+      verbose: JsonNull,
+      nextRunAt,
+    },
+    create: {
+      tenantId: options.tenantId,
+      postId: options.postId,
+      publishTargetId: options.publishTargetId,
+      batchId: options.batchId ?? null,
+      status: "queued",
+      nextRunAt,
+    },
   });
+
+  return { attempt, nextRunAt };
+}
+
+export async function schedulePublishAttempt(options: SchedulePublishAttemptOptions) {
+  return prisma.$transaction((tx) => schedulePublishAttemptInTransaction(tx, options));
+}
+
+async function lockPublishFanout(tx: Prisma.TransactionClient, tenantId: string, ownerKey: string) {
+  if (supportsAdvisoryLock) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`campux:fanout:${tenantId}:${ownerKey}`})::bigint)`;
+  }
 }
 
 async function lockPublishSchedule(tx: Prisma.TransactionClient, tenantId: string, botAccountId: string) {
@@ -620,6 +1285,24 @@ export function enqueueAttempt(queue: RuntimeQueue, tenantId: string, attemptId:
   });
 }
 
+export function enqueueAttemptUnique(
+  queue: RuntimeQueue,
+  tenantId: string,
+  attemptId: string,
+  dedupeKey: string,
+  runAt = new Date(),
+): RuntimeJob | null {
+  return queue.enqueueUnique(
+    {
+      name: "publishPost",
+      tenantId,
+      payload: { attemptId },
+      runAt,
+    },
+    dedupeKey,
+  );
+}
+
 export async function resumePublishAttemptsWaitingForCookies(queue: RuntimeQueue, botAccountId: string, logger?: FastifyBaseLogger) {
   const attempts = await prisma.publishAttempt.findMany({
     where: {
@@ -635,6 +1318,7 @@ export async function resumePublishAttemptsWaitingForCookies(queue: RuntimeQueue
         status: {
           in: ["publishing", "partially_failed", "failed"],
         },
+        tenant: tenantRuntimeRelationFilter,
       },
     },
     include: {
@@ -670,46 +1354,116 @@ export async function resumePublishAttemptsWaitingForCookies(queue: RuntimeQueue
   return attempts.length;
 }
 
+async function runPublishSideEffectWithActiveTenantLease<Result>(
+  queue: RuntimeQueue,
+  job: RuntimeJob,
+  attemptId: string,
+  tenantId: string,
+  logger: FastifyBaseLogger,
+  operation: (transaction: Prisma.TransactionClient) => Promise<Result>,
+) {
+  const lease = await runWithActiveTenantLease(prisma, tenantId, operation);
+  if (lease.active) {
+    return lease;
+  }
+  const nextRunAt = new Date(Date.now() + 60_000);
+  await prisma.publishAttempt.updateMany({
+    where: { id: attemptId, status: "running" },
+    data: { status: "queued", nextRunAt },
+  });
+  queue.rescheduleCurrent(job, nextRunAt);
+  logger.info({ attemptId, tenantId }, "publish attempt deferred before external side effect for inactive tenant");
+  return lease;
+}
+
 async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogger, config: CampuxConfig, job: RuntimeJob, notifier?: PublishingNotifier) {
   const attemptId = typeof job.payload.attemptId === "string" ? job.payload.attemptId : "";
   if (!attemptId) {
     throw new Error("publish attempt id missing");
   }
 
+  const dispatchTarget = await prisma.publishAttempt.findUnique({
+    where: { id: attemptId },
+    select: {
+      tenantId: true,
+      post: { select: { tenant: { select: { status: true } } } },
+      publishTarget: {
+        select: {
+          botAccountId: true,
+          publishDelaySeconds: true,
+        },
+      },
+    },
+  });
+  if (!dispatchTarget) {
+    return;
+  }
+  if (!isTenantRuntimeActiveStatus(dispatchTarget.post.tenant.status)) {
+    queue.rescheduleCurrent(job, new Date(Date.now() + 60_000));
+    logger.info({ attemptId, tenantId: dispatchTarget.tenantId }, "publish attempt dormant for inactive tenant");
+    return;
+  }
+
   const now = new Date();
-  const claimed = await prisma.publishAttempt.updateMany({
-    where: {
+  const claimResult = await prisma.$transaction(async (tx) => {
+    await lockPublishSchedule(tx, dispatchTarget.tenantId, dispatchTarget.publishTarget.botAccountId);
+    const botAccount = await tx.botAccount.findUnique({
+      where: { id: dispatchTarget.publishTarget.botAccountId },
+      select: { lastPublishStartedAt: true },
+    });
+    const earliestDispatchAt = resolveEarliestPublishDispatchAt({
+      now,
+      intervalSeconds: dispatchTarget.publishTarget.publishDelaySeconds,
+      latestActivityAt: botAccount?.lastPublishStartedAt ?? null,
+    });
+    const claimWhere: Prisma.PublishAttemptWhereInput = {
       id: attemptId,
       OR: [
         {
           status: "queued",
           OR: [
-            {
-              nextRunAt: null,
-            },
-            {
-              nextRunAt: {
-                lte: now,
-              },
-            },
+            { nextRunAt: null },
+            { nextRunAt: { lte: now } },
           ],
         },
         {
           status: "failed",
-          nextRunAt: {
-            lte: now,
-          },
+          nextRunAt: { lte: now },
         },
       ],
-    },
-    data: {
-      status: "running",
-      lastError: null,
-      verbose: JsonNull,
-      nextRunAt: null,
-    },
+    };
+
+    if (earliestDispatchAt.getTime() > now.getTime()) {
+      const deferred = await tx.publishAttempt.updateMany({
+        where: claimWhere,
+        data: { nextRunAt: earliestDispatchAt },
+      });
+      return { claimed: false, deferredUntil: deferred.count > 0 ? earliestDispatchAt : null };
+    }
+
+    const claimed = await tx.publishAttempt.updateMany({
+      where: claimWhere,
+      data: {
+        status: "running",
+        lastError: null,
+        verbose: JsonNull,
+        nextRunAt: null,
+      },
+    });
+    if (claimed.count > 0) {
+      await tx.botAccount.update({
+        where: { id: dispatchTarget.publishTarget.botAccountId },
+        data: { lastPublishStartedAt: now },
+      });
+    }
+    return { claimed: claimed.count > 0, deferredUntil: null };
   });
-  if (claimed.count === 0) {
+  if (claimResult.deferredUntil) {
+    queue.rescheduleCurrent(job, claimResult.deferredUntil);
+    logger.info({ attemptId, nextRunAt: claimResult.deferredUntil }, "publish attempt deferred to enforce per-bot interval");
+    return;
+  }
+  if (!claimResult.claimed) {
     logger.info({ attemptId }, "publish attempt claim skipped");
     return;
   }
@@ -772,6 +1526,17 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
   if (!attempt) {
     return;
   }
+
+  const attemptStartedAt = Date.now();
+  const attemptLogContext = {
+    attemptId: attempt.id,
+    tenantId: attempt.tenantId,
+    postId: attempt.postId,
+    batchId: attempt.batchId,
+    publishTargetId: attempt.publishTargetId,
+    botAccountId: attempt.publishTarget.botAccountId,
+  };
+  logger.info(attemptLogContext, "publish attempt started");
 
   if (!attempt.publishTarget.enabled || !attempt.publishTarget.botAccount.enabled) {
     await markPublishAttemptSkipped(attempt.id, attempt, "发布目标已停用");
@@ -882,7 +1647,17 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
           })),
         });
         const cardKey = `tenants/${attempt.tenantId}/published/qq-forum/${attempt.publishTargetId}/${target.id}.png`;
-        await storage.put(cardKey, renderedCard, "image/png");
+        const storedCard = await runPublishSideEffectWithActiveTenantLease(
+          queue,
+          job,
+          attempt.id,
+          attempt.tenantId,
+          logger,
+          () => storage.put(cardKey, renderedCard, "image/png"),
+        );
+        if (!storedCard.active) {
+          return;
+        }
         forumImageUrls.push(buildPublicForumMediaUrl(config, cardKey));
         for (const attachment of await readPostImageKeys(config, attempt.tenantId, target.attachments)) {
           forumImageUrls.push(buildPublicForumMediaUrl(config, attachment));
@@ -895,49 +1670,67 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
           : forumCaption,
         ...qzonePublication.urls,
       ].filter(Boolean).join("\n").trim();
-      const result = await createOfficialQqForumThread(
-        {
-          id: attempt.publishTarget.botAccount.id,
-          officialAppId: attempt.publishTarget.botAccount.officialAppId,
-          officialAppSecret: attempt.publishTarget.botAccount.officialAppSecret,
-        },
-        attempt.publishTarget.botAccount.reviewGroupId ?? "",
-        {
-          title: renderOfficialQqForumThreadTitle(forumTitles),
-          content: forumContent,
-          imageUrls: forumImageUrls,
-          matchDisplayIds: forumTitles.map((item) => item.postId),
+      const publication = await runPublishSideEffectWithActiveTenantLease(
+        queue,
+        job,
+        attempt.id,
+        attempt.tenantId,
+        logger,
+        async (transaction) => {
+          const result = await createOfficialQqForumThread(
+          {
+            id: attempt.publishTarget.botAccount.id,
+            officialAppId: attempt.publishTarget.botAccount.officialAppId,
+            officialAppSecret: attempt.publishTarget.botAccount.officialAppSecret,
+          },
+          attempt.publishTarget.botAccount.reviewGroupId ?? "",
+          {
+            title: renderOfficialQqForumThreadTitle(forumTitles),
+            content: forumContent,
+            imageUrls: forumImageUrls,
+            matchDisplayIds: forumTitles.map((item) => item.postId),
+          },
+          );
+          await transaction.publishAttempt.update({
+            where: { id: attempt.id },
+            data: {
+              status: "succeeded",
+              externalId: result.externalId,
+              qzoneTid: result.threadId,
+              verbose: toInputJson(result.verbose),
+              lastError: null,
+              nextRunAt: null,
+            },
+          });
+          for (const target of postsToPublish) {
+            await transaction.postLog.create({
+              data: {
+                tenantId: attempt.tenantId,
+                postId: target.id,
+                newStatus: "publishing",
+                comment: `${attempt.publishTarget.displayName} QQ 频道帖子发表成功：${result.externalId}`,
+              },
+            });
+          }
+          return result;
         },
       );
-
-      await prisma.publishAttempt.update({
-        where: {
-          id: attempt.id,
-        },
-        data: {
-          status: "succeeded",
-          externalId: result.externalId,
-          qzoneTid: result.threadId,
-          verbose: toInputJson(result.verbose),
-          lastError: null,
-          nextRunAt: null,
-        },
-      });
+      if (!publication.active) {
+        return;
+      }
+      const result = publication.value;
 
       for (const target of postsToPublish) {
-        await prisma.postLog.create({
-          data: {
-            tenantId: attempt.tenantId,
-            postId: target.id,
-            newStatus: "publishing",
-            comment: `${attempt.publishTarget.displayName} QQ 频道帖子发表成功：${result.externalId}`,
-          },
-        });
         await notifier?.notifyPublishSucceeded(target.id, attempt.publishTargetId, result.externalId).catch((error) => {
           logger.warn({ error, postId: target.id, publishTargetId: attempt.publishTargetId }, "failed to notify publish success");
         });
       }
-      await refreshAttemptPostStatuses(attempt, notifier);
+      await runWithActiveTenantLease(
+        prisma,
+        attempt.tenantId,
+        (transaction) => refreshAttemptPostStatuses(attempt, transaction, notifier),
+      );
+      logger.info({ ...attemptLogContext, durationMs: Date.now() - attemptStartedAt }, "publish attempt succeeded");
       return;
     }
 
@@ -955,7 +1748,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
       notifier,
     });
     if (!cookies) {
-      await refreshAttemptPostStatuses(attempt, notifier);
+      await refreshAttemptPostStatuses(attempt, prisma, notifier);
       return;
     }
     await prisma.publishAttempt.update({
@@ -1035,54 +1828,93 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
     const captionText = isBatch
       ? wrapBatchCaptionWithFixedText(attempt.publishTarget.botAccount.publishTextTemplate, joinBatchCaptions(captionParts, batchSeparator))
       : joinBatchCaptions(captionParts);
-    const result = await publishToQZone({
-      tenantId: attempt.tenantId,
-      postId: attempt.postId,
-      targetId: attempt.publishTargetId,
-      targetName: attempt.publishTarget.displayName,
-      text: captionText,
-      imageGroups,
-      imageUrls: aggregatedImageUrls,
-      cookies,
-    });
-
-    await prisma.publishAttempt.update({
-      where: {
-        id: attempt.id,
+    const publication = await runPublishSideEffectWithActiveTenantLease(
+      queue,
+      job,
+      attempt.id,
+      attempt.tenantId,
+      logger,
+      async (transaction) => {
+        const result = await publishToQZone({
+          tenantId: attempt.tenantId,
+          postId: attempt.postId,
+          targetId: attempt.publishTargetId,
+          targetName: attempt.publishTarget.displayName,
+          text: captionText,
+          imageGroups,
+          imageUrls: aggregatedImageUrls,
+          cookies,
+        });
+        await transaction.publishAttempt.update({
+          where: { id: attempt.id },
+          data: {
+            status: "succeeded",
+            externalId: result.externalId,
+            qzoneTid: result.qzoneTid,
+            verbose: toInputJson(result.verbose),
+            lastError: null,
+            nextRunAt: null,
+          },
+        });
+        for (const target of postsToPublish) {
+          await transaction.postLog.create({
+            data: {
+              tenantId: attempt.tenantId,
+              postId: target.id,
+              newStatus: "publishing",
+              comment: `${attempt.publishTarget.displayName} 发布成功：${result.externalId}`,
+            },
+          });
+        }
+        return result;
       },
-      data: {
-        status: "succeeded",
-        externalId: result.externalId,
-        qzoneTid: result.qzoneTid,
-        verbose: toInputJson(result.verbose),
-        lastError: null,
-        nextRunAt: null,
-      },
-    });
+    );
+    if (!publication.active) {
+      return;
+    }
+    const result = publication.value;
 
     for (const target of postsToPublish) {
-      await prisma.postLog.create({
-        data: {
-          tenantId: attempt.tenantId,
-          postId: target.id,
-          newStatus: "publishing",
-          comment: `${attempt.publishTarget.displayName} 发布成功：${result.externalId}`,
-        },
-      });
       await notifier?.notifyPublishSucceeded(target.id, attempt.publishTargetId, result.externalId).catch((error) => {
         logger.warn({ error, postId: target.id, publishTargetId: attempt.publishTargetId }, "failed to notify publish success");
       });
     }
+    logger.info({ ...attemptLogContext, durationMs: Date.now() - attemptStartedAt }, "publish attempt succeeded");
   } catch (caught) {
     const currentAttempt = await prisma.publishAttempt.findUniqueOrThrow({
       where: {
         id: attempt.id,
       },
     });
-    const message = caught instanceof Error ? caught.message : "发布失败";
-    const previousVerbose = caught instanceof QZonePublishError ? caught.verbose : null;
-    const verbose = caught instanceof QZonePublishError ? toInputJson(caught.verbose) : JsonNull;
-    const needsLogin = isQZoneLoginRequiredError(message);
+    const rawErrorMessage = caught instanceof Error ? caught.message : String(caught ?? "发布失败");
+    const serializedError = serializePublishErrorForLog(caught);
+    const message = serializedError.errorMessage || "发布失败";
+    const qzoneError = caught instanceof QZonePublishError
+      ? caught
+      : caught && typeof caught === "object" && "verbose" in caught
+        ? caught as QZonePublishError
+        : null;
+    const ambiguousPublishOutcome = caught instanceof OfficialQqPublishOutcomeUnknownError
+      || isAmbiguousQZonePublishTimeout(qzoneError?.verbose.http ?? []);
+    const nonRetryableClientError = caught instanceof BotWorkflowError && caught.statusCode < 500;
+    const operatorMessage = ambiguousPublishOutcome
+      ? `${message}（远端可能已接收，为避免重复发布未自动重试）`
+      : message;
+    logger.error(
+      {
+        ...attemptLogContext,
+        ...serializedError,
+        platformResponse: summarizeQZonePlatformResponseForLog(qzoneError),
+        ambiguousPublishOutcome,
+        nonRetryableClientError,
+        durationMs: Date.now() - attemptStartedAt,
+        attemptNumber: currentAttempt.attempt,
+      },
+      "publish attempt failed",
+    );
+    const previousVerbose = qzoneError?.verbose ?? null;
+    const verbose = qzoneError ? toInputJson(qzoneError.verbose) : JsonNull;
+    const needsLogin = isQZoneLoginRequiredError(rawErrorMessage);
     let qzoneHealthReported = false;
     if (needsLogin && attempt.publishTarget.qzoneRefreshMode === "protocol" && notifier?.refreshQZoneCookiesByProtocol && currentAttempt.attempt < maxPublishAttempts) {
       try {
@@ -1123,7 +1955,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
         await notifier.notifyPublishFailed(attempt.postId, attempt.publishTargetId, `QZone cookies 已通过协议自动刷新，将自动重试发布。原始错误：${message}`, { nextRunAt }).catch((error) => {
           logger.warn({ error, postId: attempt.postId, publishTargetId: attempt.publishTargetId }, "failed to notify publish auto refresh retry");
         });
-        await refreshAttemptPostStatuses(attempt, notifier);
+        await refreshAttemptPostStatuses(attempt, prisma, notifier);
         return;
       } catch (refreshError) {
         if (isQZoneProtocolAutoRefreshCooldownError(refreshError)) {
@@ -1154,7 +1986,10 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
         ...(attempt.publishTarget.qzoneRefreshMode === "protocol" ? {} : { autoRefreshError: "未配置协议自动刷新" }),
       });
     }
-    const shouldRetry = !needsLogin && currentAttempt.attempt < maxPublishAttempts;
+    const shouldRetry = !needsLogin
+      && !ambiguousPublishOutcome
+      && !nonRetryableClientError
+      && currentAttempt.attempt < maxPublishAttempts;
     const nextRunAt = shouldRetry
       ? await resolveNextPublishRunAt({
           tenantId: attempt.tenantId,
@@ -1169,7 +2004,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
       },
       data: {
         status: "failed",
-        lastError: message,
+        lastError: operatorMessage,
         verbose,
         nextRunAt,
       },
@@ -1180,7 +2015,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
         tenantId: attempt.tenantId,
         postId: attempt.postId,
         newStatus: shouldRetry ? "publishing" : "failed",
-        comment: `${attempt.publishTarget.displayName} 发布失败：${message}`,
+        comment: `${attempt.publishTarget.displayName} 发布失败：${operatorMessage}`,
       },
     });
 
@@ -1188,13 +2023,17 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
       enqueueAttempt(queue, attempt.tenantId, attempt.id, nextRunAt);
     }
     if (needsLogin || !nextRunAt) {
-      await notifier?.notifyPublishFailed(attempt.postId, attempt.publishTargetId, message, { needsLogin, nextRunAt }).catch((error) => {
+      await notifier?.notifyPublishFailed(attempt.postId, attempt.publishTargetId, operatorMessage, { needsLogin, nextRunAt }).catch((error) => {
         logger.warn({ error, postId: attempt.postId, publishTargetId: attempt.publishTargetId }, "failed to notify publish failure");
       });
     }
   }
 
-  await refreshAttemptPostStatuses(attempt, notifier);
+  await runWithActiveTenantLease(
+    prisma,
+    attempt.tenantId,
+    (transaction) => refreshAttemptPostStatuses(attempt, transaction, notifier),
+  );
 }
 
 async function resolveCookiesForPublish({
@@ -1374,11 +2213,11 @@ async function markAttemptWaitingForCookies({
       comment: `${publishTargetName} 等待可用 QZone cookies：${autoRefreshError ?? message}`,
     },
   });
-  if (notifier?.notifyPublishWaitingForCookies) {
-    await notifier.notifyPublishWaitingForCookies(postId, publishTargetId, autoRefreshError ?? message).catch((error) => {
-      logger.warn({ error, postId, publishTargetId }, "failed to notify publish waiting for cookies");
-    });
-  }
+  const safeReason = serializePublishErrorForLog(autoRefreshError ?? message).errorMessage;
+  logger.warn({ attemptId, tenantId, postId, publishTargetId, reason: safeReason }, "publish attempt waiting for qzone cookies");
+  await notifier?.notifyPublishWaitingForCookies?.(postId, publishTargetId, autoRefreshError ?? message).catch((error) => {
+    logger.warn({ error, postId, publishTargetId }, "failed to notify publish waiting for cookies");
+  });
 }
 
 function isQZoneLoginRequiredError(message: string) {
@@ -1439,8 +2278,12 @@ export function deriveAggregateStatus(attempts: AggregateAttempt[]): { status: P
   return null;
 }
 
-async function refreshAggregatePostStatus(postId: string, notifier?: PublishingNotifier) {
-  const post = await prisma.post.findUnique({
+async function refreshAggregatePostStatus(
+  postId: string,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
+  notifier?: PublishingNotifier,
+) {
+  const post = await client.post.findUnique({
     where: {
       id: postId,
     },
@@ -1465,7 +2308,7 @@ async function refreshAggregatePostStatus(postId: string, notifier?: PublishingN
   if (!derived) {
     return;
   }
-  await updatePostAggregateStatus(post.id, post.tenantId, post.status, derived.status, derived.comment, notifier);
+  await updatePostAggregateStatus(post.id, post.tenantId, post.status, derived.status, derived.comment, client, notifier);
 }
 
 const batchStatusFromPostStatus: Record<string, "publishing" | "published" | "partially_failed" | "failed"> = {
@@ -1479,13 +2322,27 @@ const batchStatusFromPostStatus: Record<string, "publishing" | "published" | "pa
  * 批量模式：批次内每条稿件共享同一组 batch attempt 的结果。
  * 据 batch.attempts 推导聚合状态，应用到批次内每条 post，并同步推进 PublishBatch.status。
  */
-async function refreshBatchPostStatuses(batchId: string, notifier?: PublishingNotifier) {
-  const batch = await prisma.publishBatch.findUnique({
+async function refreshBatchPostStatuses(
+  batchId: string,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
+  notifier?: PublishingNotifier,
+) {
+  const batch = await client.publishBatch.findUnique({
     where: { id: batchId },
     include: {
       items: {
         include: {
-          post: { select: { id: true, status: true, tenantId: true } },
+          post: {
+            select: {
+              id: true,
+              status: true,
+              tenantId: true,
+              logs: {
+                where: { comment: { startsWith: batchFanoutAuditPrefix } },
+                select: { comment: true },
+              },
+            },
+          },
         },
       },
       attempts: {
@@ -1500,19 +2357,35 @@ async function refreshBatchPostStatuses(batchId: string, notifier?: PublishingNo
     return;
   }
 
-  const derived = deriveAggregateStatus(batch.attempts);
+  const fanoutAuditComments = batch.items.flatMap((item) => item.post.logs.map((log) => log.comment));
+  const expectedFanoutCount = readExpectedBatchFanoutCount(fanoutAuditComments);
+  const incompleteFanout = isIncompleteBatchFanout({
+    ownerStatus: batch.status,
+    flushedAt: batch.flushedAt,
+    expectedCount: expectedFanoutCount,
+    actualCount: batch.attempts.length,
+    hasIncompleteRecoveryAudit: fanoutAuditComments.includes(incompleteBatchFanoutAuditComment),
+  });
+  const derived = incompleteFanout
+    ? {
+        status: batch.attempts.some((attempt) => attempt.status === "succeeded")
+          ? "partially_failed" as const
+          : "failed" as const,
+        comment: incompleteBatchFanoutAuditComment,
+      }
+    : deriveAggregateStatus(batch.attempts);
   if (!derived) {
     return;
   }
 
   for (const item of batch.items) {
-    await updatePostAggregateStatus(item.post.id, item.post.tenantId, item.post.status, derived.status, derived.comment, notifier);
+    await updatePostAggregateStatus(item.post.id, item.post.tenantId, item.post.status, derived.status, derived.comment, client, notifier);
   }
 
   const batchStatus = batchStatusFromPostStatus[derived.status];
   if (batchStatus && batchStatus !== batch.status) {
-    await prisma.publishBatch.update({
-      where: { id: batch.id },
+    await client.publishBatch.updateMany({
+      where: { id: batch.id, status: batch.status },
       data: { status: batchStatus },
     });
   }
@@ -1521,12 +2394,16 @@ async function refreshBatchPostStatuses(batchId: string, notifier?: PublishingNo
 /**
  * 刷新一个 attempt 影响到的所有稿件状态：批量 attempt 刷新整批，单稿 attempt 刷新单稿。
  */
-async function refreshAttemptPostStatuses(attempt: { postId: string; batchId: string | null }, notifier?: PublishingNotifier) {
+async function refreshAttemptPostStatuses(
+  attempt: { postId: string; batchId: string | null },
+  client: Prisma.TransactionClient | typeof prisma = prisma,
+  notifier?: PublishingNotifier,
+) {
   if (attempt.batchId) {
-    await refreshBatchPostStatuses(attempt.batchId, notifier);
+    await refreshBatchPostStatuses(attempt.batchId, client, notifier);
     return;
   }
-  await refreshAggregatePostStatus(attempt.postId, notifier);
+  await refreshAggregatePostStatus(attempt.postId, client, notifier);
 }
 
 async function updatePostAggregateStatus(
@@ -1535,34 +2412,36 @@ async function updatePostAggregateStatus(
   oldStatus: PostStatus,
   newStatus: PostStatus,
   comment: string,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
   notifier?: PublishingNotifier,
 ) {
   if (oldStatus === newStatus) {
     return;
   }
 
-  await prisma.post.update({
-    where: {
-      id: postId,
-    },
-    data: {
-      status: newStatus,
-      logs: {
-        create: {
-          tenantId,
-          oldStatus,
-          newStatus,
-          comment,
-        },
+  const result = await client.post.updateMany({
+      where: {
+        id: postId,
+        status: oldStatus,
       },
-    },
+      data: { status: newStatus },
+    });
+  if (result.count !== 1) {
+    return;
+  }
+  await client.postLog.create({
+      data: {
+        tenantId,
+        postId,
+        oldStatus,
+        newStatus,
+        comment,
+      },
   });
 
   if (newStatus === "published") {
-    await autoFollowOwnPostOnPublish(postId, tenantId).catch(() => undefined);
-    if (notifier?.notifyAuthorPublishSucceeded) {
-      await notifier.notifyAuthorPublishSucceeded(postId).catch(() => undefined);
-    }
+    await autoFollowOwnPostOnPublish(postId, tenantId, client).catch(() => undefined);
+    await notifier?.notifyAuthorPublishSucceeded?.(postId).catch(() => undefined);
   }
 }
 
@@ -1573,8 +2452,8 @@ async function updatePostAggregateStatus(
  * (postId, userId), seeding the baseline at the current comment count so the
  * first scheduled digest only reports comments arriving after publication.
  */
-async function autoFollowOwnPostOnPublish(postId: string, tenantId: string) {
-  const post = await prisma.post.findUnique({
+async function autoFollowOwnPostOnPublish(postId: string, tenantId: string, client: Prisma.TransactionClient | typeof prisma = prisma) {
+  const post = await client.post.findUnique({
     where: { id: postId },
     select: {
       id: true,
@@ -1595,7 +2474,7 @@ async function autoFollowOwnPostOnPublish(postId: string, tenantId: string) {
     return;
   }
   const currentCommentCount = post.qzonePostMetrics.reduce((sum, metric) => sum + (metric.commentCount ?? 0), 0);
-  await prisma.postFollow.upsert({
+  await client.postFollow.upsert({
     where: {
       postId_userId: {
         postId: post.id,

@@ -17,6 +17,7 @@ import { prisma } from "../lib/prisma";
 import { readTenantPendingPostLimit, readTenantImageCompression, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
 import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
 import { findBlockedWordsInPostImages } from "../lib/ocr";
+import { lockActiveTenantRuntime } from "../lib/tenant-runtime-lease";
 import {
   buildImageSourceSizeErrorMessage,
   buildVideoGifFfmpegArgs,
@@ -39,8 +40,9 @@ import {
 import { writeAuditLog } from "../lib/audit";
 import { compressImageBuffer, uploadAttachmentBytes, deleteAttachmentObjects, type PostAttachment } from "../lib/attachments";
 import { detectPostInjection, validateRemoteGifUrls, createAutoBan } from "../lib/sanitize";
-import { readSvgAvatarDataUrl } from "../lib/svg-avatars";
 import { formatBanNotify } from "../lib/bot-messages";
+import { readSvgAvatarDataUrl } from "../lib/svg-avatars";
+import type { EventBus } from "@campux/plugin";
 import type { RuntimeQueue } from "../runtime/queue";
 import type { OneBotRuntime } from "../runtime/onebot";
 import { autoTagPost } from "../runtime/post-tagging";
@@ -1045,6 +1047,9 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         try {
           post = await prisma.$transaction(
             async (tx) => {
+              if (!await lockActiveTenantRuntime(tx, context.selectedTenant.id)) {
+                throw { status: 409, message: "校园墙已暂停或归档" };
+              }
               await convertedGifClaimStore.consumeUsing(
                 remoteGifClaims.map((claim) => claim.proof),
                 {
@@ -1202,6 +1207,14 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         logger: request.log,
       }).catch((error) => {
         app.log.warn({ error, postId: post.id }, "failed to auto-tag post");
+      });
+
+      // 触发插件事件：稿件创建
+      const events = app.pluginEvents as EventBus | undefined;
+      events?.emit({
+        type: "post:created",
+        tenantId: context.selectedTenant.id,
+        postId: post.id,
       });
 
       return {
@@ -1818,6 +1831,14 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
     });
     oneBot?.notifyPostRecallRequested(updated.id).catch((error) => {
       app.log.warn({ error, postId: updated.id }, "failed to notify post recall request");
+    });
+
+    // 触发插件事件：稿件撤回申请
+    const events = app.pluginEvents as EventBus | undefined;
+    events?.emit({
+      type: "post:recalled",
+      tenantId: context.selectedTenant.id,
+      postId: post.id,
     });
 
     return {

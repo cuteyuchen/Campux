@@ -1,5 +1,6 @@
 import { formatReviewQueueReminderMessages, reviewQueueDefaultDisplayLimit, type ReviewQueueItem } from "../lib/bot-messages";
 import type { prisma as prismaClient } from "../lib/prisma";
+import { tenantRuntimeRelationFilter } from "../lib/tenant-runtime";
 
 export const reviewQueueDisplayLimit = reviewQueueDefaultDisplayLimit;
 export const reviewQueueReminderIntervalMs = 5 * 60 * 1000;
@@ -10,6 +11,7 @@ export type ReviewQueueBot = {
   qqUin: bigint;
   reviewGroupId: string | null;
   reviewQueueReminderThresholdHours: number;
+  reviewQueueReminderAtAll: boolean;
 };
 
 export type ReviewQueueReminder = {
@@ -90,9 +92,18 @@ export async function collectOverdueReviewReminders(
       reviewGroupId: {
         not: null,
       },
+      tenant: tenantRuntimeRelationFilter,
     },
     orderBy: {
       createdAt: "asc",
+    },
+    select: {
+      id: true,
+      tenantId: true,
+      qqUin: true,
+      reviewGroupId: true,
+      reviewQueueReminderThresholdHours: true,
+      reviewQueueReminderAtAll: true,
     },
   });
 
@@ -145,6 +156,7 @@ export async function collectOverdueReviewReminders(
         tenantId: bot.tenantId,
         status: "pending_approval",
         reviewQueueReminderSentAt: now,
+        tenant: tenantRuntimeRelationFilter,
       },
       include: {
         author: true,
@@ -166,10 +178,11 @@ export async function collectOverdueReviewReminders(
         qqUin: bot.qqUin,
         reviewGroupId: bot.reviewGroupId,
         reviewQueueReminderThresholdHours: thresholdHours,
+        reviewQueueReminderAtAll: bot.reviewQueueReminderAtAll,
       },
       items,
       hiddenCount,
-      messageChunks: buildReviewQueueReminderMessages(items, thresholdHours, now, hiddenCount),
+      messageChunks: buildReviewQueueReminderMessages(items, thresholdHours, now, hiddenCount, undefined, bot.reviewQueueReminderAtAll),
     });
   }
   return reminders;
@@ -186,6 +199,7 @@ export async function markReviewQueueReminderSent(prisma: typeof prismaClient, p
       },
       status: "pending_approval",
       reviewQueueReminderSentAt: null,
+      tenant: tenantRuntimeRelationFilter,
     },
     data: {
       reviewQueueReminderSentAt: sentAt,
@@ -193,25 +207,27 @@ export async function markReviewQueueReminderSent(prisma: typeof prismaClient, p
   });
 }
 
-export function buildReviewQueueReminderMessages(items: ReviewQueueItem[], thresholdHours: number, now = new Date(), hiddenCount = 0, maxChars?: number) {
+export function buildReviewQueueReminderMessages(items: ReviewQueueItem[], thresholdHours: number, now = new Date(), hiddenCount = 0, maxChars?: number, atAll = false) {
   return formatReviewQueueReminderMessages(items, thresholdHours, now, hiddenCount, maxChars).map((text, index) => {
     if (index > 0) {
       return text;
     }
-    return [
-      {
+    const segments = [];
+    if (atAll) {
+      segments.push({
         type: "at",
         data: {
           qq: "all",
         },
+      });
+    }
+    segments.push({
+      type: "text",
+      data: {
+        text: `\n${text}`,
       },
-      {
-        type: "text",
-        data: {
-          text: `\n${text}`,
-        },
-      },
-    ];
+    });
+    return segments;
   });
 }
 

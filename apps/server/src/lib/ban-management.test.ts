@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AUTO_BAN_DURATION_MS,
   BanEndsAtInvalidError,
   BanTargetAdminError,
   type BanManagementClient,
@@ -230,12 +231,13 @@ describe("endActiveBanRecords", () => {
 
 describe("createAutoBan", () => {
   test("notifies once when at least one tenant gets a new record", async () => {
+    const activeEndsAt = new Date(Date.now() + AUTO_BAN_DURATION_MS);
     const fake = fakeClient({
       memberships: [
         { tenantId: "tenant-a", userId: "user-a", role: "submitter" },
         { tenantId: "tenant-b", userId: "user-a", role: "submitter" },
       ],
-      bans: [activeBan({ tenantId: "tenant-a" })],
+      bans: [activeBan({ tenantId: "tenant-a", endsAt: activeEndsAt })],
     });
     let callbackCount = 0;
     const result = await createAutoBan({
@@ -255,14 +257,15 @@ describe("createAutoBan", () => {
   });
 
   test("does not notify when every tenant only updates an active record", async () => {
+    const activeEndsAt = new Date(Date.now() + AUTO_BAN_DURATION_MS);
     const fake = fakeClient({
       memberships: [
         { tenantId: "tenant-a", userId: "user-a", role: "submitter" },
         { tenantId: "tenant-b", userId: "user-a", role: "submitter" },
       ],
       bans: [
-        activeBan({ tenantId: "tenant-a" }),
-        activeBan({ id: "ban-b", tenantId: "tenant-b" }),
+        activeBan({ tenantId: "tenant-a", endsAt: activeEndsAt }),
+        activeBan({ id: "ban-b", tenantId: "tenant-b", endsAt: activeEndsAt }),
       ],
     });
     let callbackCount = 0;

@@ -2,7 +2,7 @@ import type { TenantSummary } from "@campux/domain";
 
 export type MainTab = "post" | "posts" | "stats" | "services" | "admin";
 export type PostsTab = "mine" | "review" | "published";
-export type AdminTab = "users" | "bans" | "metadata" | "bots" | "publish";
+export type AdminTab = "users" | "bans" | "metadata" | "bots" | "publish" | "plugins";
 export type TenantRole = "submitter" | "reviewer" | "admin";
 export type SystemRole = "operations_admin" | "system_operator";
 
@@ -424,6 +424,7 @@ export type AdminBotAccount = {
   reviewNotificationEnabled: boolean;
   reviewQueueAutoReminderEnabled: boolean;
   reviewQueueReminderThresholdHours: number;
+  reviewQueueReminderAtAll: boolean;
   autoFriendRequestApprovalEnabled: boolean;
   connectionToken: string;
   publishTextTemplate: PublishTextTemplate;
@@ -731,16 +732,22 @@ export type SystemTenant = {
   memberCount: number;
   bots: Array<{
     id: string;
+    platform: string;
     qqUin: string;
     displayName: string;
     enabled: boolean;
     reviewGroupId: string | null;
     lastSeenAt: string | null;
+    connection: {
+      online: boolean;
+      connectionCount: number;
+    };
     publishTargets: Array<{
       id: string;
       displayName: string;
       enabled: boolean;
       required: boolean;
+      status: "ready" | "unavailable" | "disabled";
     }>;
   }>;
 };

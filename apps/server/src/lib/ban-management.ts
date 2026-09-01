@@ -44,7 +44,7 @@ type BanRecord = {
   createdAt: Date;
 };
 
-export type BanManagementClient = typeof prisma;
+export type BanManagementClient = typeof prisma | Prisma.TransactionClient;
 
 export type UpsertBanResult = {
   action: BanAction;
@@ -64,6 +64,16 @@ export type EndActiveBansResult = {
   ban: BanRecord | null;
   endedRecordIds: string[];
 };
+
+function runBanTransaction<Result>(
+  client: BanManagementClient,
+  operation: (transaction: Prisma.TransactionClient) => Promise<Result>,
+) {
+  if ("$transaction" in client) {
+    return client.$transaction(operation, { isolationLevel: TransactionIsolationLevel.Serializable });
+  }
+  return operation(client);
+}
 
 export async function upsertBanRecord({
   tenantId,
@@ -89,7 +99,7 @@ export async function upsertBanRecord({
   }
 
   return retryTransactionSerializationFailures(
-    () => client.$transaction(async (tx) => {
+    () => runBanTransaction(client, async (tx) => {
       const membership = await tx.tenantMembership.findUnique({
         where: {
           tenantId_userId: {
@@ -214,7 +224,7 @@ export async function upsertBanRecord({
         affectedRecordIds,
         previous,
       };
-    }, { isolationLevel: TransactionIsolationLevel.Serializable }),
+    }),
     isTransactionSerializationFailure,
   );
 }
@@ -235,7 +245,7 @@ export async function endActiveBanRecords({
   now?: Date;
 }, client: BanManagementClient = prisma): Promise<EndActiveBansResult> {
   return retryTransactionSerializationFailures(
-    () => client.$transaction(async (tx) => {
+    () => runBanTransaction(client, async (tx) => {
       const activeBans = await tx.banRecord.findMany({
         where: {
           tenantId,
@@ -295,7 +305,7 @@ export async function endActiveBanRecords({
         ban,
         endedRecordIds,
       };
-    }, { isolationLevel: TransactionIsolationLevel.Serializable }),
+    }),
     isTransactionSerializationFailure,
   );
 }

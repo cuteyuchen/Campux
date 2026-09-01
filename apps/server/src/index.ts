@@ -38,11 +38,16 @@ import { registerStatsRoutes } from "./routes/stats";
 import { registerSvgRoutes } from "./routes/svg";
 import { registerSystemRoutes } from "./routes/system";
 import { registerTenantRoutes } from "./routes/tenants";
+import { registerPluginRoutes } from "./routes/plugins";
 import { runDatabaseMigrations } from "./lib/migrations";
 import { registerQZoneCookieHeartbeat } from "./lib/qzone-cookies";
 import { registerTenantLifecycleScheduler } from "./runtime/tenant-lifecycle";
 import { registerPostTagMaintenanceScheduler } from "./runtime/post-tagging";
 import { ensureBotSessionSecretConfigured } from "./lib/secret-json";
+import { isTenantRuntimeActive } from "./lib/tenant-runtime";
+import { createPluginRegistry } from "@campux/plugin";
+import type { PluginQueue } from "@campux/plugin";
+import { reviewNotifyPlugin } from "@campux/plugin-review-notify";
 
 const config = loadConfig();
 ensureBotSessionSecretConfigured();
@@ -64,8 +69,34 @@ await app.register(fastifyMultipart, {
 
 const queue = createRuntimeQueue({
   logger: app.log,
+  canRunTenantJob: (job) => isTenantRuntimeActive(prisma, job.tenantId),
 });
-const oneBot = new OneBotRuntime(queue, app.log, config);
+
+// ─── 插件系统 ───────────────────────────────────────────
+// 将 RuntimeQueue 适配为 PluginQueue 接口
+const pluginQueue: PluginQueue = {
+  registerWorker(name: string, handler: () => Promise<void>, intervalMs: number) {
+    const timer = setInterval(() => {
+      handler().catch((err) => app.log.error(`[plugin-worker:${name}] error:`, err));
+    }, intervalMs);
+    timer.unref(); // 不阻止进程退出
+    app.log.info(`[plugin] registered worker "${name}" every ${intervalMs}ms`);
+    app.addHook("onClose", () => clearInterval(timer));
+  },
+};
+
+const pluginRegistry = createPluginRegistry(app, config, prisma, pluginQueue);
+
+// 注册内置插件
+pluginRegistry.register(reviewNotifyPlugin);
+
+// 初始化所有插件（路由注册前）
+await pluginRegistry.initAll();
+
+// 将事件总线挂载到 Fastify 实例上，供路由层使用
+app.decorate("pluginEvents", pluginRegistry.getEventBus());
+
+const oneBot = new OneBotRuntime(queue, app.log, config, pluginRegistry.getEventBus());
 registerPublishingWorker(queue, app.log, config, oneBot);
 registerQZonePostMetricWorker(queue, app.log);
 
@@ -84,7 +115,11 @@ registerPostTagRoutes(app);
 registerReviewRoutes(app, queue, oneBot);
 registerSvgRoutes(app);
 registerStatsRoutes(app);
-registerSystemRoutes(app, queue, config);
+registerSystemRoutes(app, queue, config, oneBot);
+registerPluginRoutes(app, pluginRegistry);
+
+// 通知所有插件路由已注册完毕
+await pluginRegistry.readyAll();
 
 // Campux walls/console are private operating tools, not public content — keep
 // every host (app/admin/<wall>.campux.top) out of search engines. Served before
@@ -114,6 +149,7 @@ if (existsSync(webDistDir)) {
 app.addHook("onClose", async () => {
   oneBot.close();
   await queue.stop();
+  await pluginRegistry.closeAll();
   await prisma.$disconnect();
 });
 
@@ -121,7 +157,14 @@ await queue.start();
 await recoverPublishAttempts(queue, app.log);
 void oneBot.consumePendingMessageInboxes().catch((error) => app.log.warn({ error }, "failed to consume pending onebot message inboxes on startup"));
 const stopQZoneCookieHeartbeat = registerQZoneCookieHeartbeat(app.log, oneBot);
-const stopTenantLifecycleScheduler = registerTenantLifecycleScheduler({ logger: app.log, config });
+const stopTenantLifecycleScheduler = registerTenantLifecycleScheduler({
+  logger: app.log,
+  config,
+  onTenantDeactivating: (tenantId) => {
+    oneBot.disconnectTenant(tenantId);
+    return () => oneBot.activateTenant(tenantId);
+  },
+});
 const stopQZonePostMetricScheduler = registerQZonePostMetricScheduler({ queue, logger: app.log });
 const stopBotFriendSnapshotScheduler = registerBotFriendSnapshotScheduler({ caller: oneBot, logger: app.log });
 const stopFollowedPostCommentScheduler = registerFollowedPostCommentScheduler({ caller: oneBot, logger: app.log });
