@@ -1725,11 +1725,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
           logger.warn({ error, postId: target.id, publishTargetId: attempt.publishTargetId }, "failed to notify publish success");
         });
       }
-      await runWithActiveTenantLease(
-        prisma,
-        attempt.tenantId,
-        (transaction) => refreshAttemptPostStatuses(attempt, transaction, notifier),
-      );
+      await refreshAttemptPostStatusesAndNotify(attempt, notifier);
       logger.info({ ...attemptLogContext, durationMs: Date.now() - attemptStartedAt }, "publish attempt succeeded");
       return;
     }
@@ -1748,7 +1744,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
       notifier,
     });
     if (!cookies) {
-      await refreshAttemptPostStatuses(attempt, prisma, notifier);
+      await refreshAttemptPostStatusesAndNotify(attempt, notifier);
       return;
     }
     await prisma.publishAttempt.update({
@@ -1955,7 +1951,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
         await notifier.notifyPublishFailed(attempt.postId, attempt.publishTargetId, `QZone cookies 已通过协议自动刷新，将自动重试发布。原始错误：${message}`, { nextRunAt }).catch((error) => {
           logger.warn({ error, postId: attempt.postId, publishTargetId: attempt.publishTargetId }, "failed to notify publish auto refresh retry");
         });
-        await refreshAttemptPostStatuses(attempt, prisma, notifier);
+        await refreshAttemptPostStatusesAndNotify(attempt, notifier);
         return;
       } catch (refreshError) {
         if (isQZoneProtocolAutoRefreshCooldownError(refreshError)) {
@@ -2029,11 +2025,7 @@ async function handlePublishAttempt(queue: RuntimeQueue, logger: FastifyBaseLogg
     }
   }
 
-  await runWithActiveTenantLease(
-    prisma,
-    attempt.tenantId,
-    (transaction) => refreshAttemptPostStatuses(attempt, transaction, notifier),
-  );
+  await refreshAttemptPostStatusesAndNotify(attempt, notifier);
 }
 
 async function resolveCookiesForPublish({
@@ -2281,8 +2273,7 @@ export function deriveAggregateStatus(attempts: AggregateAttempt[]): { status: P
 async function refreshAggregatePostStatus(
   postId: string,
   client: Prisma.TransactionClient | typeof prisma = prisma,
-  notifier?: PublishingNotifier,
-) {
+): Promise<string[]> {
   const post = await client.post.findUnique({
     where: {
       id: postId,
@@ -2301,14 +2292,15 @@ async function refreshAggregatePostStatus(
   });
 
   if (!post) {
-    return;
+    return [];
   }
 
   const derived = deriveAggregateStatus(post.publishAttempts);
   if (!derived) {
-    return;
+    return [];
   }
-  await updatePostAggregateStatus(post.id, post.tenantId, post.status, derived.status, derived.comment, client, notifier);
+  const publishedPostId = await updatePostAggregateStatus(post.id, post.tenantId, post.status, derived.status, derived.comment, client);
+  return publishedPostId ? [publishedPostId] : [];
 }
 
 const batchStatusFromPostStatus: Record<string, "publishing" | "published" | "partially_failed" | "failed"> = {
@@ -2325,8 +2317,7 @@ const batchStatusFromPostStatus: Record<string, "publishing" | "published" | "pa
 async function refreshBatchPostStatuses(
   batchId: string,
   client: Prisma.TransactionClient | typeof prisma = prisma,
-  notifier?: PublishingNotifier,
-) {
+): Promise<string[]> {
   const batch = await client.publishBatch.findUnique({
     where: { id: batchId },
     include: {
@@ -2354,7 +2345,7 @@ async function refreshBatchPostStatuses(
   });
 
   if (!batch) {
-    return;
+    return [];
   }
 
   const fanoutAuditComments = batch.items.flatMap((item) => item.post.logs.map((log) => log.comment));
@@ -2375,11 +2366,15 @@ async function refreshBatchPostStatuses(
       }
     : deriveAggregateStatus(batch.attempts);
   if (!derived) {
-    return;
+    return [];
   }
 
+  const publishedPostIds: string[] = [];
   for (const item of batch.items) {
-    await updatePostAggregateStatus(item.post.id, item.post.tenantId, item.post.status, derived.status, derived.comment, client, notifier);
+    const publishedPostId = await updatePostAggregateStatus(item.post.id, item.post.tenantId, item.post.status, derived.status, derived.comment, client);
+    if (publishedPostId) {
+      publishedPostIds.push(publishedPostId);
+    }
   }
 
   const batchStatus = batchStatusFromPostStatus[derived.status];
@@ -2389,6 +2384,7 @@ async function refreshBatchPostStatuses(
       data: { status: batchStatus },
     });
   }
+  return publishedPostIds;
 }
 
 /**
@@ -2397,13 +2393,31 @@ async function refreshBatchPostStatuses(
 async function refreshAttemptPostStatuses(
   attempt: { postId: string; batchId: string | null },
   client: Prisma.TransactionClient | typeof prisma = prisma,
-  notifier?: PublishingNotifier,
 ) {
   if (attempt.batchId) {
-    await refreshBatchPostStatuses(attempt.batchId, client, notifier);
+    return refreshBatchPostStatuses(attempt.batchId, client);
+  }
+  return refreshAggregatePostStatus(attempt.postId, client);
+}
+
+export async function refreshAttemptPostStatusesAndNotify(
+  attempt: { tenantId: string; postId: string; batchId: string | null },
+  notifier?: Pick<PublishingNotifier, "notifyAuthorPublishSucceeded">,
+  client: Pick<typeof prisma, "$transaction"> = prisma,
+) {
+  const leased = await runWithActiveTenantLease(
+    client,
+    attempt.tenantId,
+    (transaction) => refreshAttemptPostStatuses(attempt, transaction),
+  );
+  if (!leased.active) {
     return;
   }
-  await refreshAggregatePostStatus(attempt.postId, client, notifier);
+
+  // OneBot takes its own tenant lease. Notify only after releasing this lock.
+  for (const postId of leased.value) {
+    await notifier?.notifyAuthorPublishSucceeded?.(postId).catch(() => undefined);
+  }
 }
 
 async function updatePostAggregateStatus(
@@ -2413,7 +2427,6 @@ async function updatePostAggregateStatus(
   newStatus: PostStatus,
   comment: string,
   client: Prisma.TransactionClient | typeof prisma = prisma,
-  notifier?: PublishingNotifier,
 ) {
   if (oldStatus === newStatus) {
     return;
@@ -2441,7 +2454,7 @@ async function updatePostAggregateStatus(
 
   if (newStatus === "published") {
     await autoFollowOwnPostOnPublish(postId, tenantId, client).catch(() => undefined);
-    await notifier?.notifyAuthorPublishSucceeded?.(postId).catch(() => undefined);
+    return postId;
   }
 }
 
