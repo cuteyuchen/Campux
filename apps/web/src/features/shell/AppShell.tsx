@@ -175,6 +175,7 @@ export function AppShell({
               <AdminPage
                 activeTab={adminTab}
                 currentUserId={me.user.id}
+                currentSystemRole={me.user.systemRole}
                 selectedTenant={me.currentTenant}
                 metadata={metadata}
                 detailTarget={adminUserDetailTarget}

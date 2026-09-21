@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { PluginRegistry } from "@campux/plugin";
-import { requireReadyTenant } from "../lib/auth";
+import { requireReadyTenant, requireSystemOperator } from "../lib/auth";
 import { z } from "zod";
 
 const pluginStatusSchema = z.object({
@@ -15,14 +15,24 @@ const auditLogQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(50),
 });
 
+type AuthGates = {
+  requireReadyTenant: typeof requireReadyTenant;
+  requireSystemOperator: typeof requireSystemOperator;
+};
+
 /**
  * 插件管理路由。
- * 提供已注册插件的列表查询、启用/禁用和事件日志，供管理面板使用。
+ * 只读接口供校园墙 admin 查看；全局 runtime status 修改仅限 system_operator，
+ * 因为 PluginRegistry status 影响当前进程所有 tenant（含投稿前审核）。
  */
-export function registerPluginRoutes(app: FastifyInstance, pluginRegistry: PluginRegistry) {
+export function registerPluginRoutes(
+  app: FastifyInstance,
+  pluginRegistry: PluginRegistry,
+  auth: AuthGates = { requireReadyTenant, requireSystemOperator },
+) {
   // 获取所有已注册插件的信息
   app.get("/api/admin/plugins", async (request, reply) => {
-    await requireReadyTenant(request, reply, "admin");
+    await auth.requireReadyTenant(request, reply, "admin");
 
     const statuses = pluginRegistry.listStatuses();
     const plugins = pluginRegistry.list().map((plugin) => ({
@@ -39,9 +49,9 @@ export function registerPluginRoutes(app: FastifyInstance, pluginRegistry: Plugi
     return { plugins };
   });
 
-  // 设置插件启用/禁用状态
+  // 设置插件全局启用/禁用状态（进程内，影响所有 tenant）
   app.patch("/api/admin/plugins/:name/status", async (request, reply) => {
-    await requireReadyTenant(request, reply, "admin");
+    await auth.requireSystemOperator(request, reply);
     const params = z.object({ name: z.string().min(1) }).parse(request.params);
     const body = pluginStatusSchema.parse(request.body);
 
@@ -51,18 +61,19 @@ export function registerPluginRoutes(app: FastifyInstance, pluginRegistry: Plugi
     }
 
     pluginRegistry.setStatus(params.name, body.status);
-    app.log.info(`[PluginRoutes] plugin "${params.name}" status set to "${body.status}" by admin`);
+    app.log.info(`[PluginRoutes] plugin "${params.name}" global status set to "${body.status}" by system_operator`);
 
     return {
       ok: true,
       name: params.name,
       status: body.status,
+      scope: "global",
     };
   });
 
   // 获取插件事件日志
   app.get("/api/admin/plugins/events", async (request, reply) => {
-    await requireReadyTenant(request, reply, "admin");
+    await auth.requireReadyTenant(request, reply, "admin");
     const query = eventLogQuerySchema.parse(request.query);
 
     const events = pluginRegistry.getEventBus().getRecentEvents(query.limit);
@@ -80,7 +91,7 @@ export function registerPluginRoutes(app: FastifyInstance, pluginRegistry: Plugi
 
   // 获取插件权限声明
   app.get("/api/admin/plugins/permissions", async (request, reply) => {
-    await requireReadyTenant(request, reply, "admin");
+    await auth.requireReadyTenant(request, reply, "admin");
 
     const permissions = pluginRegistry.listPermissions();
 
@@ -96,7 +107,7 @@ export function registerPluginRoutes(app: FastifyInstance, pluginRegistry: Plugi
 
   // 获取插件审计日志
   app.get("/api/admin/plugins/audit", async (request, reply) => {
-    await requireReadyTenant(request, reply, "admin");
+    await auth.requireReadyTenant(request, reply, "admin");
     const query = auditLogQuerySchema.parse(request.query);
 
     const auditLog = pluginRegistry.getAuditLog(query.limit);

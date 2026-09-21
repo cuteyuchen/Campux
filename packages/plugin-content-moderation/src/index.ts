@@ -11,7 +11,9 @@ export const contentModerationPlugin: CampuxPlugin = {
   description: "投稿内容审核插件：文字违禁词与图片 OCR 违禁词校验",
   enabledByDefault: true,
   permissions: {
-    required: ["db:read", "config:read", "tenant:data", "events:listen"],
+    // Plugin only reads tenant metadata/config and calls the OCR sidecar;
+    // it does not subscribe to EventBus events.
+    required: ["db:read", "config:read", "tenant:data"],
     riskLevel: "medium",
     rationale: "读取校园墙违禁词/OCR 开关配置，并在投稿写入前调用 OCR sidecar 做图片文字审核",
   },

@@ -397,6 +397,26 @@ describe("createPluginRegistry", () => {
       expect(enabledRun).toHaveBeenCalledTimes(1);
     });
 
+    test("setStatus takes effect immediately for validators in the current process", async () => {
+      const run = mock(() => ({ allowed: true }) as const);
+      registry.register(createTestPlugin({
+        name: "toggle-plugin",
+        validators: { beforePostCreate: run },
+      }));
+
+      await registry.validatePostBeforeCreate(baseInput);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      registry.setStatus("toggle-plugin", "disabled");
+      await registry.validatePostBeforeCreate(baseInput);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      registry.setStatus("toggle-plugin", "enabled");
+      await registry.validatePostBeforeCreate(baseInput);
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(registry.getStatus("toggle-plugin")).toBe("enabled");
+    });
+
     test("stops after the first reject and writes validation audit", async () => {
       const secondRun = mock(() => ({ allowed: true }) as const);
       registry.register(createTestPlugin({

@@ -319,6 +319,7 @@ function writeBanListPreferences(tenantId: string, preferences: BanListPreferenc
 export function AdminPage({
   activeTab,
   currentUserId,
+  currentSystemRole,
   selectedTenant,
   metadata,
   detailTarget,
@@ -329,6 +330,7 @@ export function AdminPage({
 }: {
   activeTab: AdminTab;
   currentUserId: string;
+  currentSystemRole?: string | null;
   selectedTenant: TenantSummary;
   metadata: TenantMetadata;
   detailTarget?: { userId: string; nonce: number } | null;
@@ -1474,7 +1476,7 @@ export function AdminPage({
               />
             </TabsContent>
             <TabsContent value="plugins" className="mt-4 min-h-0 flex-1 overflow-y-auto pb-24 pr-1 md:pb-6">
-              <PluginsPanel />
+              <PluginsPanel canToggleGlobalStatus={currentSystemRole === "system_operator"} />
             </TabsContent>
       </Tabs>
       <MemberDetailDialog

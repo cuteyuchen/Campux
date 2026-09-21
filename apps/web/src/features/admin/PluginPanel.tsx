@@ -59,7 +59,7 @@ type AuditLogResponse = {
   auditLog: AuditLogEntry[];
 };
 
-export function PluginsPanel() {
+export function PluginsPanel({ canToggleGlobalStatus }: { canToggleGlobalStatus?: boolean }) {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState<string | null>(null);
@@ -69,6 +69,7 @@ export function PluginsPanel() {
   const [showPermissions, setShowPermissions] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [showAuditLog, setShowAuditLog] = useState(false);
+  const canToggle = canToggleGlobalStatus === true;
 
   useEffect(() => {
     let cancelled = false;
@@ -202,25 +203,31 @@ export function PluginsPanel() {
                 <LifecycleBadge label="onReady" active={plugin.hasReady} />
                 <LifecycleBadge label="onClose" active={plugin.hasClose} />
                 <div className="flex-1" />
-                <button
-                  type="button"
-                  disabled={toggling === plugin.name}
-                  onClick={() => togglePlugin(plugin.name, plugin.status)}
-                  className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold transition ${
-                    plugin.status === "enabled"
-                      ? "border border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
-                      : "border border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
-                  } disabled:opacity-50`}
-                >
-                  {toggling === plugin.name ? (
-                    <span className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  ) : plugin.status === "enabled" ? (
-                    <PowerOffIcon className="size-3" />
-                  ) : (
-                    <PowerIcon className="size-3" />
-                  )}
-                  {plugin.status === "enabled" ? "禁用" : "启用"}
-                </button>
+                {canToggle ? (
+                  <button
+                    type="button"
+                    disabled={toggling === plugin.name}
+                    onClick={() => togglePlugin(plugin.name, plugin.status)}
+                    className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                      plugin.status === "enabled"
+                        ? "border border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
+                        : "border border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
+                    } disabled:opacity-50`}
+                  >
+                    {toggling === plugin.name ? (
+                      <span className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    ) : plugin.status === "enabled" ? (
+                      <PowerOffIcon className="size-3" />
+                    ) : (
+                      <PowerIcon className="size-3" />
+                    )}
+                    {plugin.status === "enabled" ? "禁用" : "启用"}
+                  </button>
+                ) : (
+                  <span className="text-xs text-slate-400">
+                    全局运行状态仅系统运维可修改
+                  </span>
+                )}
               </div>
 
               {plugin.campuxVersion ? (
@@ -235,7 +242,7 @@ export function PluginsPanel() {
 
       <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
         <p className="text-xs font-semibold text-slate-500">
-          插件在服务端注册，通过事件系统与核心功能交互。禁用插件将在下次服务重启后生效（已禁用的插件不会执行生命周期钩子）。如需添加或移除插件，请修改服务端配置并重启服务。
+          插件运行状态为当前进程内的全局状态；修改后立即影响后续插件调用（含投稿前内容审核），服务重启后恢复默认状态。仅系统运维可修改全局状态；校园墙管理员可在墙设置中调整违禁词与 OCR 开关。如需添加或移除插件，请修改服务端配置并重启服务。
         </p>
       </div>
 
