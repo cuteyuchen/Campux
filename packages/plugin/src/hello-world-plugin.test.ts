@@ -295,7 +295,7 @@ describe("HelloWorld 插件集成测试", () => {
     // 监听 helloworld:ready 事件
     const receivedEvents: any[] = [];
     const bus = registry.getEventBus();
-    bus.on("helloworld:ready" as any, (e) => receivedEvents.push(e));
+    bus.on("helloworld:ready" as any, (e) => { receivedEvents.push(e); });
 
     await registry.readyAll();
 

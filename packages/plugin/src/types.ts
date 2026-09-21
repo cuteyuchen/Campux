@@ -71,7 +71,42 @@ export type PluginAuditAction =
   | "plugin:permission_check"
   | "plugin:request_sent"
   | "plugin:response_received"
-  | "plugin:error";
+  | "plugin:error"
+  | "plugin:validation_rejected";
+
+/** 投稿来源渠道 */
+export type PostSubmissionSource = "web" | "onebot";
+
+/** 投稿前校验的附件描述（不包含字节） */
+export interface PostValidationAttachment {
+  key: string;
+  fileName?: string | undefined;
+  contentType?: string | undefined;
+}
+
+/** 投稿写入前校验输入 */
+export interface PostValidationInput {
+  tenantId: string;
+  source: PostSubmissionSource;
+  text: string;
+  attachments: PostValidationAttachment[];
+}
+
+/** 投稿写入前校验结果 */
+export type PostValidationResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      code: string;
+      message: string;
+      statusCode?: number | undefined;
+    };
+
+/** 插件投稿写入前验证器 */
+export type BeforePostCreateValidator = (
+  ctx: PluginContext,
+  input: PostValidationInput,
+) => Promise<PostValidationResult> | PostValidationResult;
 
 /** 插件审计日志条目 */
 export interface PluginAuditEntry {
@@ -200,6 +235,10 @@ export interface CampuxPlugin {
   enabledByDefault?: boolean;
   /** 插件权限声明（注册时校验） */
   permissions?: PluginPermissions;
+  /** 通用扩展点：投稿写入前验证链（与事后事件分离） */
+  validators?: {
+    beforePostCreate?: BeforePostCreateValidator;
+  };
 }
 
 // ─── 插件注册表 ────────────────────────────────────────
@@ -232,4 +271,10 @@ export interface PluginRegistry {
   listPermissions(): ReadonlyArray<{ name: string; permissions: PluginPermissions | null }>;
   /** 获取审计日志 */
   getAuditLog(maxEntries?: number): ReadonlyArray<PluginAuditEntry>;
+  /**
+   * 投稿写入前验证管线。
+   * 按注册顺序执行 enabled 插件的 beforePostCreate；第一个 reject 立即停止。
+   * 插件异常不会静默放行，返回 500 reject 并写 plugin:error 审计。
+   */
+  validatePostBeforeCreate(input: PostValidationInput): Promise<PostValidationResult>;
 }

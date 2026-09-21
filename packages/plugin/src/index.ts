@@ -17,6 +17,11 @@ export type {
   PluginRequestHandler,
   PluginAuditAction,
   PluginAuditEntry,
+  PostSubmissionSource,
+  PostValidationAttachment,
+  PostValidationInput,
+  PostValidationResult,
+  BeforePostCreateValidator,
 } from "./types";
 
 export { createEventBus } from "./event-bus";

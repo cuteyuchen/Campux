@@ -338,4 +338,106 @@ describe("createPluginRegistry", () => {
     bus.emit({ type: "post:created", tenantId: "t1", postId: "p1" });
     expect(handler).toHaveBeenCalledTimes(0);
   });
+
+  // ─── 投稿写入前验证管线 ────────────────────────────────
+
+  describe("validatePostBeforeCreate", () => {
+    const baseInput = {
+      tenantId: "tenant-1",
+      source: "web" as const,
+      text: "hello",
+      attachments: [],
+    };
+
+    test("returns allow when no validators are registered", async () => {
+      registry.register(createTestPlugin());
+      await expect(registry.validatePostBeforeCreate(baseInput)).resolves.toEqual({ allowed: true });
+    });
+
+    test("executes enabled validators in registration order", async () => {
+      const order: string[] = [];
+      registry.register(createTestPlugin({
+        name: "first",
+        validators: {
+          beforePostCreate: async () => {
+            order.push("first");
+            return { allowed: true };
+          },
+        },
+      }));
+      registry.register(createTestPlugin({
+        name: "second",
+        validators: {
+          beforePostCreate: async () => {
+            order.push("second");
+            return { allowed: true };
+          },
+        },
+      }));
+
+      await expect(registry.validatePostBeforeCreate(baseInput)).resolves.toEqual({ allowed: true });
+      expect(order).toEqual(["first", "second"]);
+    });
+
+    test("skips disabled plugins", async () => {
+      const enabledRun = mock(() => ({ allowed: true }) as const);
+      const disabledRun = mock(() => ({ allowed: true }) as const);
+      registry.register(createTestPlugin({
+        name: "disabled-plugin",
+        enabledByDefault: false,
+        validators: { beforePostCreate: disabledRun },
+      }));
+      registry.register(createTestPlugin({
+        name: "enabled-plugin",
+        validators: { beforePostCreate: enabledRun },
+      }));
+
+      await expect(registry.validatePostBeforeCreate(baseInput)).resolves.toEqual({ allowed: true });
+      expect(disabledRun).not.toHaveBeenCalled();
+      expect(enabledRun).toHaveBeenCalledTimes(1);
+    });
+
+    test("stops after the first reject and writes validation audit", async () => {
+      const secondRun = mock(() => ({ allowed: true }) as const);
+      registry.register(createTestPlugin({
+        name: "rejecting-plugin",
+        validators: {
+          beforePostCreate: () => ({
+            allowed: false,
+            code: "blocked_words",
+            message: "blocked",
+            statusCode: 400,
+          }),
+        },
+      }));
+      registry.register(createTestPlugin({
+        name: "later-plugin",
+        validators: { beforePostCreate: secondRun },
+      }));
+
+      const result = await registry.validatePostBeforeCreate(baseInput);
+      expect(result).toMatchObject({ allowed: false, code: "blocked_words", statusCode: 400 });
+      expect(secondRun).not.toHaveBeenCalled();
+      const audit = registry.getAuditLog().filter((entry) => entry.action === "plugin:validation_rejected");
+      expect(audit.length).toBeGreaterThan(0);
+      expect(audit.at(-1)?.pluginName).toBe("rejecting-plugin");
+    });
+
+    test("does not treat validator exceptions as allow", async () => {
+      registry.register(createTestPlugin({
+        name: "throwing-plugin",
+        validators: {
+          beforePostCreate: () => {
+            throw new Error("boom");
+          },
+        },
+      }));
+
+      const result = await registry.validatePostBeforeCreate(baseInput);
+      expect(result).toMatchObject({ allowed: false, statusCode: 500 });
+      const audit = registry.getAuditLog().filter((entry) => entry.action === "plugin:error");
+      expect(audit.length).toBeGreaterThan(0);
+      expect(audit.at(-1)?.pluginName).toBe("throwing-plugin");
+    });
+  });
 });

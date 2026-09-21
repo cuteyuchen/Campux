@@ -37,6 +37,8 @@
         "@campux/domain": "workspace:*",
         "@campux/integrations": "workspace:*",
         "@campux/plugin": "workspace:*",
+        "@campux/plugin-content-moderation": "workspace:*",
+        "@campux/plugin-review-notify": "workspace:*",
         "@campux/render": "workspace:*",
         "@campux/telemetry": "workspace:*",
         "@fastify/cors": "^11.0.1",
@@ -121,6 +123,21 @@
         "@campux/db": "workspace:*",
         "@campux/domain": "workspace:*",
         "fastify": "^5.3.2",
+      },
+      "devDependencies": {
+        "typescript": "^5.8.3",
+      },
+    },
+    "packages/plugin-content-moderation": {
+      "name": "@campux/plugin-content-moderation",
+      "dependencies": {
+        "@campux/config": "workspace:*",
+        "@campux/db": "workspace:*",
+        "@campux/integrations": "workspace:*",
+        "@campux/plugin": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "^5.8.3",
       },
     },
     "packages/plugin-review-notify": {
@@ -294,6 +311,8 @@
     "@campux/integrations": ["@campux/integrations@workspace:packages/integrations"],
 
     "@campux/plugin": ["@campux/plugin@workspace:packages/plugin"],
+
+    "@campux/plugin-content-moderation": ["@campux/plugin-content-moderation@workspace:packages/plugin-content-moderation"],
 
     "@campux/plugin-review-notify": ["@campux/plugin-review-notify@workspace:packages/plugin-review-notify"],
 
@@ -1832,6 +1851,10 @@
     "@babel/helper-create-class-features-plugin/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
     "@campux/dash/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "@campux/plugin/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "@campux/plugin-content-moderation/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "@campux/server/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 

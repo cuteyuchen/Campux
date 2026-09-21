@@ -3,6 +3,7 @@ import { createEventBus } from "./event-bus";
 import type {
   EventBus,
   PluginAuditEntry,
+  PluginEvent,
   PluginRequest,
   PluginResponse,
 } from "./types";
@@ -22,7 +23,7 @@ describe("createEventBus", () => {
 
   test("订阅并接收事件", () => {
     const received: PluginEvent[] = [];
-    bus.on("post:created", (e) => received.push(e));
+    bus.on("post:created", (e) => { received.push(e); });
 
     const event: PluginEvent = {
       type: "post:created",
@@ -37,7 +38,7 @@ describe("createEventBus", () => {
 
   test("通配符 * 接收所有事件", () => {
     const received: PluginEvent[] = [];
-    bus.on("*", (e) => received.push(e));
+    bus.on("*", (e) => { received.push(e); });
 
     bus.emit({ type: "post:created", tenantId: "t1", postId: "p1" });
     bus.emit({ type: "tenant:created", tenantId: "t2" });
@@ -47,7 +48,7 @@ describe("createEventBus", () => {
 
   test("取消订阅后不再接收事件", () => {
     const received: PluginEvent[] = [];
-    const unsub = bus.on("post:created", (e) => received.push(e));
+    const unsub = bus.on("post:created", (e) => { received.push(e); });
 
     bus.emit({ type: "post:created", tenantId: "t1", postId: "p1" });
     expect(received).toHaveLength(1);
@@ -59,8 +60,8 @@ describe("createEventBus", () => {
 
   test("removeAllListeners 清除所有监听器", () => {
     const received: PluginEvent[] = [];
-    bus.on("post:created", (e) => received.push(e));
-    bus.on("*", (e) => received.push(e));
+    bus.on("post:created", (e) => { received.push(e); });
+    bus.on("*", (e) => { received.push(e); });
 
     bus.removeAllListeners();
     bus.emit({ type: "post:created", tenantId: "t1", postId: "p1" });

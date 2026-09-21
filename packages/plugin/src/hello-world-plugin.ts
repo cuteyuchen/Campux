@@ -34,7 +34,7 @@ export const helloWorldPlugin: CampuxPlugin = {
       ctx.logger.info("HelloWorld 插件正在初始化...");
 
       // 读取配置（演示 config:read 权限）
-      const serverPort = ctx.config.CAMPUX_SERVER_PORT;
+      const serverPort = ctx.config.serverPort;
       ctx.logger.info(`当前服务端口: ${serverPort}`);
 
       // 订阅事件（演示 events:listen 权限）

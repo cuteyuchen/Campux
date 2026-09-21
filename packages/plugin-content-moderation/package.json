@@ -1,5 +1,5 @@
 {
-  "name": "@campux/plugin",
+  "name": "@campux/plugin-content-moderation",
   "private": true,
   "type": "module",
   "exports": {
@@ -10,9 +10,9 @@
   },
   "dependencies": {
     "@campux/config": "workspace:*",
-    "@campux/domain": "workspace:*",
     "@campux/db": "workspace:*",
-    "fastify": "^5.3.2"
+    "@campux/integrations": "workspace:*",
+    "@campux/plugin": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

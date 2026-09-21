@@ -10,6 +10,8 @@ import type {
   PluginRuntimeStatus,
   PluginPermission,
   PluginAuditEntry,
+  PostValidationInput,
+  PostValidationResult,
 } from "./types";
 import { createEventBus } from "./event-bus";
 import type { EventBus } from "./types";
@@ -253,6 +255,59 @@ export function createPluginRegistry(
 
     getAuditLog(maxEntries = 50): ReadonlyArray<PluginAuditEntry> {
       return events.getAuditLog(maxEntries);
+    },
+
+    async validatePostBeforeCreate(input: PostValidationInput): Promise<PostValidationResult> {
+      for (const plugin of plugins.values()) {
+        const validator = plugin.validators?.beforePostCreate;
+        if (!validator) continue;
+        if (!isEnabled(plugin.name)) {
+          app.log.info(`[PluginRegistry] skipping beforePostCreate for disabled plugin "${plugin.name}"`);
+          continue;
+        }
+
+        const pctx = buildContext(plugin);
+        try {
+          const result = await validator(pctx, input);
+          if (!result.allowed) {
+            recordAudit({
+              timestamp: Date.now(),
+              action: "plugin:validation_rejected",
+              pluginName: plugin.name,
+              detail: `beforePostCreate rejected code=${result.code}`,
+              metadata: {
+                source: input.source,
+                tenantId: input.tenantId,
+                code: result.code,
+                statusCode: result.statusCode ?? 400,
+              },
+            });
+            return result;
+          }
+        } catch (err) {
+          // Registry must not silently treat validator exceptions as allow.
+          // Remote-service allow/block stays inside the owning plugin.
+          recordAudit({
+            timestamp: Date.now(),
+            action: "plugin:error",
+            pluginName: plugin.name,
+            detail: `beforePostCreate failed: ${String(err)}`,
+            metadata: {
+              source: input.source,
+              tenantId: input.tenantId,
+              stage: "beforePostCreate",
+            },
+          });
+          app.log.error(`[PluginRegistry] plugin "${plugin.name}" beforePostCreate failed: ${String(err)}`);
+          return {
+            allowed: false,
+            code: "plugin_validator_error",
+            message: "投稿内容校验暂时不可用，请稍后重试",
+            statusCode: 500,
+          };
+        }
+      }
+      return { allowed: true };
     },
 
     async closeAll(ctx?: PluginContext): Promise<void> {
