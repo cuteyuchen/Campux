@@ -61,3 +61,9 @@ apps/server/src/standalone/embedded-assets.generated.ts
 /data/
 
 .codex-run
+
+# OCR local assets / smoke venv
+apps/ocr/models/
+.ocr-smoke-venv/
+.mimocode/tmp-*.py
+

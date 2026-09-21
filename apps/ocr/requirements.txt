@@ -1,6 +1,9 @@
 fastapi==0.115.12
-paddleocr==3.3.1
-paddlepaddle==3.3.1
+# PaddleOCR 3.7 + ONNX Runtime: no paddlepaddle dependency, so Linux arm64
+# wheels can be used for both amd64 and aarch64. PP-OCRv4 remains selected via
+# pinned local ONNX model dirs (official hosts have no PP-OCRv4 onnx packages).
+paddleocr==3.7.0
+onnxruntime==1.22.1
 pillow==11.1.0
 python-multipart==0.0.20
 uvicorn[standard]==0.34.0

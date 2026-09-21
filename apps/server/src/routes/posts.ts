@@ -14,9 +14,8 @@ import { buildPublishedFeed, filterPublishedFeedByTag, type BatchFeedInput, type
 import { serializeAssignedPostTags } from "../lib/post-tags";
 import { parsePostDisplayIdFilter } from "../lib/post-display-id-filter";
 import { prisma } from "../lib/prisma";
-import { readTenantPendingPostLimit, readTenantImageCompression, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
-import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
-import { findBlockedWordsInPostImages } from "../lib/ocr";
+import { readTenantPendingPostLimit, readTenantImageCompression, readTenantPublishMode } from "../lib/tenant-metadata";
+import type { PluginRegistry } from "@campux/plugin";
 import { lockActiveTenantRuntime } from "../lib/tenant-runtime-lease";
 import {
   buildImageSourceSizeErrorMessage,
@@ -393,7 +392,13 @@ function isTransactionSerializationFailure(value: unknown) {
   return isPrismaKnownRequestError(value) && value.code === "P2034";
 }
 
-export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _queue: RuntimeQueue, oneBot?: OneBotRuntime) {
+export function registerPostRoutes(
+  app: FastifyInstance,
+  config: CampuxConfig,
+  _queue: RuntimeQueue,
+  oneBot?: OneBotRuntime,
+  pluginRegistry?: PluginRegistry,
+) {
   app.get("/api/public/forum-media", async (request, reply) => {
     const query = publicForumMediaQuerySchema.parse(request.query);
     if (!verifyPublicForumMediaSignature(query.key, query.expires, query.signature)) {
@@ -806,15 +811,22 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         };
       }
 
-      const [tenantBlockedWords, ocrBlockedWordsEnabled] = await Promise.all([
-        readTenantBlockedWords(prisma, context.selectedTenant.id),
-        readTenantOcrBlockedWordsEnabled(prisma, context.selectedTenant.id),
-      ]);
-      const blockedWords = findBlockedWords(text, tenantBlockedWords);
-      if (blockedWords.length > 0) {
+      const pluginValidation = pluginRegistry
+        ? await pluginRegistry.validatePostBeforeCreate({
+            tenantId: context.selectedTenant.id,
+            source: "web",
+            text,
+            attachments: staged.map((item) => ({
+              key: item.key,
+              fileName: item.fileName,
+              contentType: item.contentType,
+            })),
+          })
+        : { allowed: true as const };
+      if (!pluginValidation.allowed) {
         throw {
-          status: 400,
-          message: formatBlockedWordsError(blockedWords),
+          status: pluginValidation.statusCode ?? 400,
+          message: pluginValidation.message,
         };
       }
 
@@ -1017,19 +1029,26 @@ export function registerPostRoutes(app: FastifyInstance, config: CampuxConfig, _
         staged.splice(0, staged.length, ...ordered);
       }
 
-      const imageBlockedWords = await findBlockedWordsInPostImages({
-        config,
-        tenantId: context.selectedTenant.id,
-        attachments: staged,
-        blockedWords: tenantBlockedWords,
-        ocrEnabled: ocrBlockedWordsEnabled,
-        logger: request.log,
-      });
-      if (imageBlockedWords.length > 0) {
-        throw {
-          status: 400,
-          message: formatImageBlockedWordsError(imageBlockedWords),
-        };
+      // Remote-GIF attachments may have been staged after the first validation.
+      // Re-run the shared plugin pipeline before the Post transaction so OCR
+      // still sees the final attachment set, while keeping cleanup semantics.
+      if (remoteGifClaims.length > 0 && pluginRegistry) {
+        const finalValidation = await pluginRegistry.validatePostBeforeCreate({
+          tenantId: context.selectedTenant.id,
+          source: "web",
+          text,
+          attachments: staged.map((item) => ({
+            key: item.key,
+            fileName: item.fileName,
+            contentType: item.contentType,
+          })),
+        });
+        if (!finalValidation.allowed) {
+          throw {
+            status: finalValidation.statusCode ?? 400,
+            message: finalValidation.message,
+          };
+        }
       }
 
       const initialStatus: "pending_approval" = "pending_approval";

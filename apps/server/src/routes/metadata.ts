@@ -17,9 +17,6 @@ import {
   imageCompressionQualityKey,
   imageCompressionMaxDimensionKey,
   imageMaxSizeMetadataKey,
-  ocrBlockedWordsEnabledKey,
-  normalizeOcrBlockedWordsEnabled,
-  readTenantOcrBlockedWordsEnabled,
   botStylishMessagesEnabledKey,
   normalizeBotStylishMessagesEnabled,
   botPrivatePostStylishEnabledKey,
@@ -51,8 +48,11 @@ import {
   maxBlockedWordLength,
   maxBlockedWords,
   normalizeBlockedWords,
+  normalizeOcrBlockedWordsEnabled,
+  ocrBlockedWordsEnabledKey,
   readTenantBlockedWords,
-} from "../lib/blocked-words";
+  readTenantOcrBlockedWordsEnabled,
+} from "@campux/plugin-content-moderation";
 
 const publicMetadataKeys = [
   "brand",

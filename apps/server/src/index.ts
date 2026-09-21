@@ -47,6 +47,7 @@ import { ensureBotSessionSecretConfigured } from "./lib/secret-json";
 import { isTenantRuntimeActive } from "./lib/tenant-runtime";
 import { createPluginRegistry } from "@campux/plugin";
 import type { PluginQueue } from "@campux/plugin";
+import { contentModerationPlugin } from "@campux/plugin-content-moderation";
 import { reviewNotifyPlugin } from "@campux/plugin-review-notify";
 
 const config = loadConfig();
@@ -87,7 +88,8 @@ const pluginQueue: PluginQueue = {
 
 const pluginRegistry = createPluginRegistry(app, config, prisma, pluginQueue);
 
-// 注册内置插件
+// 注册内置插件：内容审核先于事后通知插件，保证 beforePostCreate 顺序稳定
+pluginRegistry.register(contentModerationPlugin);
 pluginRegistry.register(reviewNotifyPlugin);
 
 // 初始化所有插件（路由注册前）
@@ -96,7 +98,7 @@ await pluginRegistry.initAll();
 // 将事件总线挂载到 Fastify 实例上，供路由层使用
 app.decorate("pluginEvents", pluginRegistry.getEventBus());
 
-const oneBot = new OneBotRuntime(queue, app.log, config, pluginRegistry.getEventBus());
+const oneBot = new OneBotRuntime(queue, app.log, config, pluginRegistry.getEventBus(), pluginRegistry);
 registerPublishingWorker(queue, app.log, config, oneBot);
 registerQZonePostMetricWorker(queue, app.log);
 
@@ -110,7 +112,7 @@ registerAiRoutes(app);
 registerOAuthRoutes(app);
 registerAdminRoutes(app, queue, oneBot);
 registerBotRoutes(app, queue);
-registerPostRoutes(app, config, queue, oneBot);
+registerPostRoutes(app, config, queue, oneBot, pluginRegistry);
 registerPostTagRoutes(app);
 registerReviewRoutes(app, queue, oneBot);
 registerSvgRoutes(app);

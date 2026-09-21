@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { FastifyBaseLogger } from "fastify";
 import type { CampuxConfig } from "@campux/config";
-import type { EventBus } from "@campux/plugin";
+import type { EventBus, PluginRegistry, PostValidationResult } from "@campux/plugin";
 import { getStorageDriver, setQZoneEmotionPrivate } from "@campux/integrations";
 import { Prisma, TransactionIsolationLevel, isPrismaKnownRequestError } from "@campux/db";
 import {
@@ -27,9 +27,7 @@ import { prisma } from "../lib/prisma";
 import { executePostRecall, PostRecallExecutionError, PostRecallNotSupportedError } from "../lib/post-recall";
 import { countOneBotPostableImages, extractOneBotImageSegments, extractOneBotMessageSegments, extractOneBotPlainText, isPrivatePostCancelText, isPrivatePostEditText, isPrivatePostFinishText, isPrivatePostUndoText, parsePrivatePostConfirmText, parsePrivatePostManagementCommand, parsePrivatePostModeText, parsePrivatePostPublishModeText, parsePrivatePostStartModeText, parsePrivatePostStartText, resolvePrivatePostSubmissionText, shouldAutoRegisterPrivateMessage, type OneBotMessageSegment } from "../lib/private-posting";
 import { analyzePrivatePostSemantics, type PrivatePostSemanticResult } from "../lib/private-posting-ai";
-import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantOcrBlockedWordsEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
-import { findBlockedWords, formatBlockedWordsError, formatImageBlockedWordsError, readTenantBlockedWords } from "../lib/blocked-words";
-import { findBlockedWordsInPostImages, OcrUnavailableError } from "../lib/ocr";
+import { readTenantImageCompression, readTenantPendingPostLimit, readTenantBotStylishMessagesEnabled, readTenantBotPrivatePostStylishEnabled, readTenantPublishMode } from "../lib/tenant-metadata";
 import { isTenantRuntimeActive, tenantRuntimeRelationFilter } from "../lib/tenant-runtime";
 import { lockActiveTenantRuntime, runWithActiveTenantLease } from "../lib/tenant-runtime-lease";
 import {
@@ -359,6 +357,7 @@ export class OneBotRuntime {
     private readonly logger: FastifyBaseLogger,
     private readonly config?: CampuxConfig,
     private readonly pluginEvents?: EventBus,
+    private readonly pluginRegistry?: PluginRegistry,
   ) {
     this.inboxConsumer = new BotMessageInboxConsumer({
       logger: this.logger,
@@ -3609,6 +3608,27 @@ export class OneBotRuntime {
     return next;
   }
 
+  private async validatePrivatePostSubmission(
+    tenantId: string,
+    text: string,
+    attachments: Array<{ key: string; fileName?: string | undefined; contentType?: string | undefined }>,
+  ): Promise<PostValidationResult> {
+    if (!this.pluginRegistry) {
+      return {
+        allowed: false,
+        code: "plugin_registry_missing",
+        message: "投稿内容校验未就绪，请稍后重试",
+        statusCode: 503,
+      };
+    }
+    return this.pluginRegistry.validatePostBeforeCreate({
+      tenantId,
+      source: "onebot",
+      text,
+      attachments,
+    });
+  }
+
   private async createPostFromPrivateDraft(
     bot: { id: string; tenantId: string; qqUin: bigint; displayName?: string | null },
     userQqUin: string,
@@ -3624,34 +3644,13 @@ export class OneBotRuntime {
       throw new BotWorkflowError("正文太长了，请控制在 1000 字以内，再发送“结束”。", 400);
     }
 
-    const [tenantBlockedWords, ocrBlockedWordsEnabled] = await Promise.all([
-      readTenantBlockedWords(prisma, bot.tenantId),
-      readTenantOcrBlockedWordsEnabled(prisma, bot.tenantId),
-    ]);
-    const blockedWords = findBlockedWords(text, tenantBlockedWords);
-    if (blockedWords.length > 0) {
-      throw new BotWorkflowError(formatBlockedWordsError(blockedWords), 400);
-    }
-
-    if (this.config) {
-      try {
-        const imageBlockedWords = await findBlockedWordsInPostImages({
-          config: this.config,
-          tenantId: bot.tenantId,
-          attachments: draft.attachments,
-          blockedWords: tenantBlockedWords,
-          ocrEnabled: ocrBlockedWordsEnabled,
-          logger: this.logger,
-        });
-        if (imageBlockedWords.length > 0) {
-          throw new BotWorkflowError(formatImageBlockedWordsError(imageBlockedWords), 400);
-        }
-      } catch (error) {
-        if (error instanceof OcrUnavailableError) {
-          throw new BotWorkflowError(error.message, error.status);
-        }
-        throw error;
-      }
+    const validation = await this.validatePrivatePostSubmission(bot.tenantId, text, draft.attachments.map((item) => ({
+      key: item.key,
+      fileName: item.fileName,
+      contentType: item.contentType,
+    })));
+    if (!validation.allowed) {
+      throw new BotWorkflowError(validation.message, validation.statusCode ?? 400);
     }
 
     // 注入检测：XSS、CSS、代码、CQ 码

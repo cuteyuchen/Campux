@@ -40,11 +40,22 @@ jobs:
       - name: Generate SQLite Prisma client for server tests
         run: bun run db:sqlite:generate
 
+      - name: Test plugin SDK
+        run: bun test packages/plugin
+
+      - name: Test content moderation plugin
+        run: bun test packages/plugin-content-moderation
+
       - name: Test server
         run: bun test apps/server/src
 
       - name: Test web
         run: bun test apps/web/src
+
+      - name: Typecheck plugin packages
+        run: |
+          bun --cwd packages/plugin typecheck
+          bun --cwd packages/plugin-content-moderation typecheck
 
       - name: Typecheck server
         run: bun --cwd apps/server typecheck
@@ -52,36 +63,27 @@ jobs:
       - name: Typecheck web
         run: bun --cwd apps/web typecheck
 
+      - name: Ensure generated clients are clean
+        run: |
+          bun run db:generate
+          git diff --check
+
   build:
     name: Build and Push
     needs: verify
     runs-on: ubuntu-latest
     outputs:
-      image_tag: ${{ steps.meta.outputs.tag }}
+      image_tag: sha-${{ github.sha }}
     env:
       DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
       DOCKER_HUB_PASSWORD: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      IS_DEFAULT_BRANCH: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve Docker tag
-        id: meta
-        shell: bash
-        run: |
-          raw_tag="${GITHUB_REF_NAME}"
-          tag="$(printf '%s' "$raw_tag" \
-            | tr '[:upper:]' '[:lower:]' \
-            | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+//; s/-+$//' \
-            | cut -c1-128)"
-          if [ -z "$tag" ]; then
-            tag="${GITHUB_SHA::12}"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "image=rockchin/campux:$tag" >> "$GITHUB_OUTPUT"
-          echo "dash_image=rockchin/campux-dash:$tag" >> "$GITHUB_OUTPUT"
-          echo "landing_image=rockchin/campux-landing:$tag" >> "$GITHUB_OUTPUT"
-          echo "build_version=$tag-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -100,38 +102,79 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Campux GHCR image
+      - name: Compute GHCR tags
+        id: ghcr_tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha_tag="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          if [ "${IS_DEFAULT_BRANCH}" = "true" ]; then
+            # :last is reserved for the default branch only.
+            tags="$(printf '%s\n%s' "$sha_tag" "${IMAGE_NAME}:last")"
+          else
+            tags="$sha_tag"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "ocr_tags=$(
+            if [ "${IS_DEFAULT_BRANCH}" = "true" ]; then
+              printf '%s\n%s' "${OCR_IMAGE_NAME}:sha-${GITHUB_SHA}" "${OCR_IMAGE_NAME}:last"
+            else
+              printf '%s' "${OCR_IMAGE_NAME}:sha-${GITHUB_SHA}"
+            fi
+          )" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch Campux GHCR image
         uses: docker/build-push-action@v6
-        continue-on-error: true
-        id: build_ghcr
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:last
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.ghcr_tags.outputs.tags }}
           build-args: |
-            CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
+            CAMPUX_BUILD_VERSION=sha-${GITHUB_SHA::12}
           cache-from: type=gha,scope=campux
           cache-to: type=gha,mode=max,scope=campux
           provenance: false
           sbom: false
 
-      - name: Retry Campux GHCR image build
-        if: steps.build_ghcr.outcome == 'failure'
+      - name: Build and push multi-arch OCR GHCR image
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: apps/ocr/Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:last
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          build-args: |
-            CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
-          cache-from: type=gha,scope=campux
-          cache-to: type=gha,mode=max,scope=campux
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.ghcr_tags.outputs.ocr_tags }}
+          cache-from: type=gha,scope=campux-ocr
+          cache-to: type=gha,mode=max,scope=campux-ocr
           provenance: false
           sbom: false
+
+      - name: Inspect multi-arch manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect "${OCR_IMAGE_NAME}:sha-${GITHUB_SHA}"
+
+      - name: Resolve Docker Hub branch tag
+        id: meta
+        if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
+        shell: bash
+        run: |
+          raw_tag="${GITHUB_REF_NAME}"
+          tag="$(printf '%s' "$raw_tag" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+//; s/-+$//' \
+            | cut -c1-128)"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_SHA::12}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=rockchin/campux:$tag" >> "$GITHUB_OUTPUT"
+          echo "dash_image=rockchin/campux-dash:$tag" >> "$GITHUB_OUTPUT"
+          echo "landing_image=rockchin/campux-landing:$tag" >> "$GITHUB_OUTPUT"
+          echo "build_version=$tag-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
         if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
@@ -143,8 +186,6 @@ jobs:
       - name: Build and push branch image
         if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
-        continue-on-error: true
-        id: build_main
         with:
           context: .
           push: true
@@ -153,27 +194,10 @@ jobs:
             CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Retry build on failure
-        if: ${{ steps.build_main.outcome == 'failure' && env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.image }}
-          build-args: |
-            CAMPUX_BUILD_VERSION=${{ steps.meta.outputs.build_version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # 重试时禁用 provenance attestation 减少 registry 交互
-          provenance: false
-          sbom: false
 
       - name: Build and push telemetry dash image
         if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
-        continue-on-error: true
-        id: build_dash
         with:
           context: .
           file: apps/dash/Dockerfile
@@ -181,25 +205,10 @@ jobs:
           tags: ${{ steps.meta.outputs.dash_image }}
           cache-from: type=gha,scope=dash
           cache-to: type=gha,mode=max,scope=dash
-
-      - name: Retry dash build on failure
-        if: ${{ steps.build_dash.outcome == 'failure' && env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: apps/dash/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.dash_image }}
-          cache-from: type=gha,scope=dash
-          cache-to: type=gha,mode=max,scope=dash
-          provenance: false
-          sbom: false
 
       - name: Build and push landing image
         if: ${{ env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
         uses: docker/build-push-action@v6
-        continue-on-error: true
-        id: build_landing
         with:
           context: .
           file: landing/Dockerfile
@@ -207,32 +216,6 @@ jobs:
           tags: ${{ steps.meta.outputs.landing_image }}
           cache-from: type=gha,scope=landing
           cache-to: type=gha,mode=max,scope=landing
-
-      - name: Retry landing build on failure
-        if: ${{ steps.build_landing.outcome == 'failure' && env.DOCKER_HUB_USERNAME != '' && env.DOCKER_HUB_PASSWORD != '' }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: landing/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.landing_image }}
-          cache-from: type=gha,scope=landing
-          cache-to: type=gha,mode=max,scope=landing
-          provenance: false
-          sbom: false
-
-      - name: Build and push OCR image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: apps/ocr/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.OCR_IMAGE_NAME }}:last
-            ${{ env.OCR_IMAGE_NAME }}:sha-${{ github.sha }}
-          cache-from: type=gha,scope=campux-ocr
-          cache-to: type=gha,mode=max,scope=campux-ocr
           provenance: false
           sbom: false
 
