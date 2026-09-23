@@ -12,4 +12,9 @@ describe("CAMPUX_BUILD_VERSION workflow expansion", () => {
     expect(workflow).toContain('echo "campux_build_version=sha-${short_sha}" >> "$GITHUB_OUTPUT"');
     expect(workflow).toContain("CAMPUX_BUILD_VERSION=${{ steps.ghcr_tags.outputs.campux_build_version }}");
   });
+
+  test("writes multi-line GHCR tags with the GITHUB_OUTPUT delimiter form", () => {
+    expect(workflow).toContain('echo "tags<<EOF"');
+    expect(workflow).toContain('echo "ocr_tags<<EOF"');
+  });
 });

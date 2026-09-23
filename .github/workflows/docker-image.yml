@@ -108,22 +108,26 @@ jobs:
         run: |
           set -euo pipefail
           sha_tag="${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          if [ "${IS_DEFAULT_BRANCH}" = "true" ]; then
-            # :last is reserved for the default branch only.
-            tags="$(printf '%s\n%s' "$sha_tag" "${IMAGE_NAME}:last")"
-          else
-            tags="$sha_tag"
-          fi
+          ocr_sha_tag="${OCR_IMAGE_NAME}:sha-${GITHUB_SHA}"
           # with.build-args does not expand Bash ${GITHUB_SHA::12}; compute here.
           short_sha="${GITHUB_SHA::12}"
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "ocr_tags=$(
-            if [ "${IS_DEFAULT_BRANCH}" = "true" ]; then
-              printf '%s\n%s' "${OCR_IMAGE_NAME}:sha-${GITHUB_SHA}" "${OCR_IMAGE_NAME}:last"
-            else
-              printf '%s' "${OCR_IMAGE_NAME}:sha-${GITHUB_SHA}"
-            fi
-          )" >> "$GITHUB_OUTPUT"
+          # GITHUB_OUTPUT rejects bare multiline values; use the EOF delimiter form.
+          if [ "${IS_DEFAULT_BRANCH}" = "true" ]; then
+            # :last is reserved for the default branch only.
+            {
+              echo "tags<<EOF"
+              echo "$sha_tag"
+              echo "${IMAGE_NAME}:last"
+              echo "EOF"
+              echo "ocr_tags<<EOF"
+              echo "$ocr_sha_tag"
+              echo "${OCR_IMAGE_NAME}:last"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$sha_tag" >> "$GITHUB_OUTPUT"
+            echo "ocr_tags=$ocr_sha_tag" >> "$GITHUB_OUTPUT"
+          fi
           echo "campux_build_version=sha-${short_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push multi-arch Campux GHCR image
