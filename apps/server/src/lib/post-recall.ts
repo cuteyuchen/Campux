@@ -36,11 +36,13 @@ export async function executePostRecall({
   postId,
   actorId,
   logger,
+  reason,
 }: {
   tenantId: string;
   postId: string;
   actorId: string;
   logger: FastifyBaseLogger;
+  reason?: string;
 }) {
   const leased = await runWithActiveTenantLease(prisma, tenantId, async (transaction) => {
     const batchItem = await transaction.publishBatchItem.findUnique({
@@ -108,7 +110,7 @@ export async function executePostRecall({
               actorId,
               oldStatus: post.status,
               newStatus: "recalled",
-              comment: "没有可撤回的 QZone 发表记录，直接标记为已撤回",
+              comment: reason ? `主动撤回：${reason}` : "没有可撤回的 QZone 发表记录，直接标记为已撤回",
             },
           },
         },
@@ -122,6 +124,8 @@ export async function executePostRecall({
         detail: {
           displayId: post.displayId,
           targetCount: 0,
+          results: [],
+          reason,
         },
       }, transaction);
       return {
@@ -285,6 +289,7 @@ export async function executePostRecall({
         detail: {
           displayId: post.displayId,
           results,
+          reason,
         },
       }, transaction);
       return { ok: false as const, results };
@@ -304,7 +309,7 @@ export async function executePostRecall({
             actorId,
             oldStatus: post.status,
             newStatus: "recalled",
-            comment: `已撤回 ${results.length} 个发布目标`,
+            comment: reason ? `主动撤回：${reason}` : `已撤回 ${results.length} 个发布目标`,
           },
         },
       },
@@ -318,6 +323,7 @@ export async function executePostRecall({
       detail: {
         displayId: post.displayId,
         results,
+        reason,
       },
     }, transaction);
     return {

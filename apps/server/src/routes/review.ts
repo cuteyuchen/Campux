@@ -596,13 +596,18 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
   });
 
   const adminRecallBodySchema = z.object({
+    reason: z.string().trim().min(1, "请填写撤回理由").max(500),
     silent: z.boolean().optional(),
   });
 
   app.post("/api/review/posts/:id/recall/admin", async (request, reply) => {
-    const context = await requireReadyTenant(request, reply, "admin");
+    const context = await requireReadyTenant(request, reply, "reviewer");
     const params = postParamsSchema.parse(request.params);
-    const body = adminRecallBodySchema.parse(request.body ?? {});
+    const parsedBody = adminRecallBodySchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      return reply.code(400).send({ message: parsedBody.error.issues[0]?.message ?? "撤回请求无效" });
+    }
+    const body = parsedBody.data;
     const post = await prisma.post.findFirst({
       where: {
         id: params.id,
@@ -617,6 +622,7 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
       return reply.code(409).send({ message: "只有已发表稿件可以直接撤回" });
     }
 
+    const { reason } = body;
     const silent = body.silent === true;
 
     try {
@@ -625,8 +631,9 @@ export function registerReviewRoutes(app: FastifyInstance, queue: RuntimeQueue, 
         postId: post.id,
         actorId: context.user.id,
         logger: app.log,
+        reason,
       });
-      oneBot?.notifyPostRecalled(result.post.id, result.results.length, { skipAuthor: silent }).catch((error) => {
+      oneBot?.notifyPostRecalled(result.post.id, result.results.length, { skipAuthor: silent, reason }).catch((error) => {
         app.log.warn({ error, postId: result.post.id }, "failed to notify post recalled");
       });
       return {

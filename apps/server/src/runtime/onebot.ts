@@ -627,7 +627,7 @@ export class OneBotRuntime {
     await this.sendTenantReviewNotification(post.tenantId, message);
   }
 
-  async notifyPostRecalled(postId: string, targetCount: number, opts?: { skipAuthor?: boolean; manuallyRecalled?: boolean }) {
+  async notifyPostRecalled(postId: string, targetCount: number, opts?: { skipAuthor?: boolean; manuallyRecalled?: boolean; reason?: string }) {
     const post = await prisma.post.findUnique({
       where: {
         id: postId,
@@ -643,6 +643,7 @@ export class OneBotRuntime {
     const groupSuffix = [
       opts?.manuallyRecalled ? "管理员已手动撤回批量发布内容" : "",
       opts?.skipAuthor ? "静默撤回，未通知作者" : "",
+      opts?.reason ? `撤回理由：${opts.reason}` : "",
     ].filter(Boolean).map((message) => `（${message}）`).join("\n");
     await this.sendTenantReviewNotification(post.tenantId, formatPostRecalledGroup(post.displayId, targetCount, stylishEnabled) + (groupSuffix ? `\n${groupSuffix}` : ""));
 

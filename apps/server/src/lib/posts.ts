@@ -88,9 +88,17 @@ export function toPostListItem(post: {
   tagAssignments?: PostTagAssignmentInput[];
 }) {
   const recallLog = post.logs
-    ?.filter((log) => log.oldStatus === "published" && log.newStatus === "pending_recall")
+    ?.filter((log) =>
+      ((log.oldStatus === "published" && log.newStatus === "pending_recall") || log.newStatus === "recalled") &&
+      (log.comment.startsWith("用户申请撤回：") || log.comment.startsWith("主动撤回：")),
+    )
     .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
-  const recallReason = recallLog?.comment.startsWith("用户申请撤回：") ? recallLog.comment.slice("用户申请撤回：".length).trim() : null;
+  let recallReason: string | null = null;
+  if (recallLog?.comment.startsWith("用户申请撤回：")) {
+    recallReason = recallLog.comment.slice("用户申请撤回：".length).trim();
+  } else if (recallLog?.comment.startsWith("主动撤回：")) {
+    recallReason = recallLog.comment.slice("主动撤回：".length).trim();
+  }
 
   return {
     id: post.id,
